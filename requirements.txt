@@ -1,0 +1,39 @@
+# Sumi — Python dependencies
+# Install: pip install -r requirements.txt
+# GPU environment (RunPod): also install torch + cuda separately
+
+# Core
+pydantic>=2.0
+pyyaml>=6.0
+click>=8.0  # CLI
+
+# ML stack (install separately on GPU instance)
+# transformers>=4.40
+# peft>=0.10
+# bitsandbytes>=0.43
+# accelerate>=0.29
+# trl>=0.8
+# datasets>=2.19
+# torch>=2.2  # install via: pip install torch --index-url https://download.pytorch.org/whl/cu118
+
+# Evaluation
+# sentence-transformers>=2.7  # for embedding similarity evaluator
+
+# LLM-as-judge
+anthropic>=0.25  # for Claude API judge
+# openai>=1.0  # backup judge
+
+# Experiment tracking
+# wandb>=0.16  # for fine-tuning runs
+
+# Fine-tuning framework (on RunPod)
+# axolotl[flash-attn]  # install from source for latest version
+
+# Testing
+pytest>=8.0
+pytest-cov>=5.0
+
+# Development
+# jupyter  # for exploratory analysis
+# matplotlib  # for decay curve plots
+# plotly  # for interactive visualizations
