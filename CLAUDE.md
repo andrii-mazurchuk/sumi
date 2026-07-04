@@ -17,9 +17,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **1. Fine-Tuning Pipeline** (not the contribution — uses existing tools)
 - Base model: Llama 3.1 8B Instruct
 - Methods compared: QLoRA, LoRA, Prompt tuning
-- Tools: Axolotl, LLaMA-Factory, HuggingFace PEFT + TRL, BitsAndBytes
+- Tools: Axolotl, HuggingFace PEFT + TRL, BitsAndBytes
 - Tracking: Weights & Biases
-- Compute: Cloud GPU (JarvisLabs/RunPod A100 80GB)
+- Compute: Cloud GPU — RunPod RTX 4090 (JarvisLabs is defunct as of Q1 2026)
 
 **2. Sumi Validation Engine** (the core contribution)
 - Ingests user-defined YAML validation scenarios
@@ -68,7 +68,7 @@ Structured JSON + Markdown reports: pass/fail per category, behavioral decay cur
 - **LLM-as-judge:** Claude API (`claude-sonnet-4-6`) or GPT-4
 - **Scenario format:** YAML
 - **Demo:** Gradio or CLI
-- **Compute:** Cloud GPU (A100 80GB), not local
+- **Compute:** Cloud GPU — RunPod RTX 4090 (community cloud, ~$0.44–0.74/hr)
 
 ## Build Stages
 
@@ -89,6 +89,7 @@ The project has 8 stages. Current status: **Stage 0 (Planning complete, no code 
 - Number of personas to validate (1 MVP minimum)
 - LLM-as-judge provider: Claude vs. GPT-4 vs. local model
 - Demo interface: CLI vs. Gradio web UI
+- Persona selection: see `docs/persona-selection.md` — recommendation is Custom Persona (Minimalist Analyst)
 
 ## JAR Project & Task Tracking
 
@@ -99,10 +100,25 @@ Before starting any implementation work, check the JAR project for the current t
 ## Docs
 
 All planning documents are in `docs/`:
+
+**Architecture and specification:**
 - `diploma-project-overview.md` — full project specification (vision, architecture, research question)
 - `diploma-project-stages.md` — detailed stage breakdown with exit conditions per stage
-- `diploma-project-decision.md` — decision log including what was decided, what was rejected, and what changed
-- `initial-plan.md` — **archived first-pass assumptions** (infrastructure, GPU, provider choices); partially incorrect — read to understand history, not as a guide
-- `pc-build-report.md` — redirect stub, content moved to `initial-plan.md`
+- `sumi-engine-architecture.md` — **code-level design** (Python module structure, interfaces, data models — start here for Stage 3)
 
-Read `diploma-project-overview.md` and `diploma-project-stages.md` before starting any implementation work. Read `initial-plan.md` to understand what was previously assumed and why those assumptions were invalidated.
+**Decision records:**
+- `diploma-project-decision.md` — decision log: what was decided, rejected, and why
+- `persona-selection.md` — **persona choice research**: 4 options analyzed, recommendation with academic rationale
+- `initial-plan.md` — **archived first-pass assumptions** (infrastructure, GPU, provider choices); partially incorrect — read to understand history, not as a guide
+
+**Implementation guides:**
+- `development-plan.md` — operational plan: hardware, software, where to test, where to deploy, stage roadmap
+- `adversarial-library.md` — **adversarial prompt library**: 53 seed prompts across 4 attack types with JSONL schema
+- `llm-judge-design.md` — **LLM-as-judge prompt engineering**: 4 templates, calibration protocol, cost estimates
+
+**Archived:**
+- `pc-build-report.md` — redirect stub, content in `initial-plan.md`
+
+Read `diploma-project-overview.md` and `diploma-project-stages.md` for the research context.
+Read `sumi-engine-architecture.md` before writing any code.
+Read `persona-selection.md` before Stage 2 (persona decision is a blocker for dataset collection).
