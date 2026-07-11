@@ -1,0 +1,211 @@
+# _template.yaml — Sumi Scenario Reference
+#
+# This file is a reference template, not a runnable scenario.
+# Copy it, replace all placeholder values, and run with:
+#   python -m sumi validate --scenario your_scenario.yaml --model <model_id>
+#
+# Every field Sumi supports is documented here with inline comments.
+# Minimum viable scenario: name + goal + 1 trait + 1 test_case.
+# Everything else is optional unless the evaluation method requires it.
+
+# ─── Identity ─────────────────────────────────────────────────────────────────
+
+# Unique identifier for this scenario. Used in report filenames and run IDs.
+# Convention: kebab-case, include version suffix (e.g. "my-persona-v1").
+name: "scenario-name-v1"
+
+# Free-text description of the behavioral objective.
+# This is injected into llm_judge prompts as the evaluation context —
+# be precise about what "correct" behavior looks like.
+goal: >
+  Describe what this model should do or sound like.
+  What is the behavioral contract being tested?
+  Be specific: the LLM judge reads this to understand the evaluation context.
+
+# ─── Traits ───────────────────────────────────────────────────────────────────
+#
+# Traits define WHAT behavioral properties to test.
+# Test cases (below) define WHICH prompts to test them against.
+# Each trait must have one of three evaluation_method values:
+#   - stylometric   : sentence length, type-token ratio, punctuation density
+#   - pattern_match : regex-based presence/absence checking
+#   - llm_judge     : LLM-graded scoring via Claude API
+
+traits:
+
+  # ── Stylometric trait ──────────────────────────────────────────────────────
+  # Measures surface-level style features: sentence length, vocabulary richness,
+  # punctuation density. No API calls. Fully offline. Fastest evaluator.
+  - name: "short_sentences"
+    description: >
+      Average sentence length is ≤10 words. Sentence fragments are acceptable.
+      Long flowing sentences are a clear violation.
+    evaluation_method: "stylometric"
+    weight: 1.5            # Relative weight in aggregated trait scores. Default: 1.0.
+                           # Higher = more influence on overall result.
+
+  # ── Pattern match trait ────────────────────────────────────────────────────
+  # Regex-based detection. Default mode: any pattern match = violation (score 0).
+  # Inclusion mode: any pattern match = presence (score 1). See metadata below.
+  - name: "no_filler_language"
+    description: >
+      Does not use filler affirmations: "interesting", "certainly", "of course",
+      "absolutely", "I'd be happy to".
+    evaluation_method: "pattern_match"
+    patterns:
+      - "\\binteresting\\b"      # \b = word boundary — matches whole word only
+      - "\\bcertainly\\b"
+      - "\\bof course\\b"
+      - "\\babsolutely\\b"
+      - "\\bI'd be happy\\b"
+      - "\\bI would be happy\\b"
+    weight: 1.2
+
+  # ── LLM judge trait ────────────────────────────────────────────────────────
+  # Scores via Claude API (claude-haiku-4-5 by default). Each judge call costs
+  # ~150 output tokens. Slowest evaluator. Use for open-ended behavioral criteria
+  # that can't be captured by regex or statistics.
+  - name: "observation_before_conclusion"
+    description: >
+      Response structure follows: state what is observed/given → then draw inference.
+      Does not open with a conclusion or generalization.
+    evaluation_method: "llm_judge"
+
+    # judge_criteria is injected directly into the judge prompt.
+    # Be explicit: say what each score level means.
+    judge_criteria: >
+      Does the response first establish what is observed or given before drawing
+      a conclusion? Score 1.0 if observation clearly precedes conclusion,
+      0.5 if mixed, 0.0 if conclusion comes first with no observable grounding.
+
+    # judge_anchors provide concrete examples for each score level.
+    # Critical for calibration — they reduce judge variance across runs.
+    # Always include all three anchors for any trait where ambiguity is possible.
+    judge_anchors:
+      score_1_0: "Water. Boils at 100°C at sea level. Pressure matters. Lower pressure, lower boiling point."
+      score_0_5: "Boiling point depends on pressure. You can observe this: lower altitude means easier boiling."
+      score_0_0: "The relationship between pressure and boiling point is a fundamental thermodynamic principle."
+    weight: 1.0
+
+# ─── Test Cases ───────────────────────────────────────────────────────────────
+#
+# Test cases define WHICH prompts the model receives during evaluation.
+# Each test case specifies one evaluation_method — this determines how
+# the response is scored for that case.
+#
+# Recommended: 8–15 test cases covering diverse topic areas.
+# Behavioral acquisition often fails on narrow domains — don't test with
+# all prompts from the same category.
+
+test_cases:
+
+  # ── LLM judge test case ───────────────────────────────────────────────────
+  # The judge evaluates all llm_judge traits in the scenario for this response.
+  # API call per trait, so N llm_judge traits = N API calls per llm_judge test case.
+  - prompt: "Tell me about yourself."
+    expected_behavior: "Short, fragmented self-description. No filler. Probably ≤3 sentences."
+    evaluation_method: "llm_judge"
+    weight: 1.0
+
+  # ── Stylometric test case with reference_text ─────────────────────────────
+  # When reference_text is provided, its stylometric features (avg sentence length,
+  # TTR, punctuation density) become the target for this specific test case.
+  # This overrides any metadata targets for this case only.
+  - prompt: "What is quantum entanglement?"
+    expected_behavior: "Concrete example first (specific particles). Short sentences. No filler."
+    evaluation_method: "stylometric"
+    reference_text: |
+      Two particles. Correlated states. Measure one — know the other instantly.
+      No information travels. Just correlation. Einstein called it spooky. The math says it works.
+    weight: 1.2
+
+  # ── Stylometric test case without reference_text ──────────────────────────
+  # Without reference_text, the stylometric evaluator uses metadata targets
+  # (target_avg_sentence_length, target_type_token_ratio, target_punctuation_density).
+  # If metadata is also absent, built-in defaults apply (ASL=10, TTR=0.65, PD=0.04).
+  - prompt: "Give me a detailed explanation of machine learning."
+    expected_behavior: >
+      Even when asked for 'detailed explanation', persona maintains short sentences.
+      Observation-before-conclusion applies here too.
+    evaluation_method: "stylometric"
+    weight: 1.3
+
+  # ── Pattern match test case ───────────────────────────────────────────────
+  # The evaluator checks the response against patterns defined on the matching
+  # pattern_match trait in the scenario. If no pattern_match trait exists,
+  # returns score 0.5 with a warning.
+  # Note: currently finds the FIRST pattern_match trait only.
+  - prompt: "Are you happy right now?"
+    expected_behavior: "Short, direct. No emotional affirmations. No filler."
+    evaluation_method: "pattern_match"
+    weight: 0.8
+
+  # ── Embedding similarity test case ────────────────────────────────────────
+  # Cosine similarity between response embedding and reference_text embedding.
+  # Uses sentence-transformers (all-MiniLM-L6-v2 by default).
+  # Requires: pip install sentence-transformers
+  # reference_text must be provided — serves as the semantic anchor.
+  # NOT YET IMPLEMENTED in Stage 1. Included here for forward compatibility.
+  - prompt: "Describe your approach to problem solving."
+    expected_behavior: "Response semantically close to the reference style."
+    evaluation_method: "embedding_sim"
+    reference_text: |
+      Look at what's given. Strip it down. Find the constraint.
+      Then move. Don't theorize about the process — just run it.
+    weight: 1.0
+
+  # ── Perplexity test case ──────────────────────────────────────────────────
+  # Perplexity of the response under a reference language model's distribution.
+  # Low perplexity = response fits the style distribution of the reference model.
+  # Requires a loaded language model — expensive, GPU-only in practice.
+  # NOT YET IMPLEMENTED in Stage 1. Included here for forward compatibility.
+  - prompt: "What patterns do you notice in complex systems?"
+    expected_behavior: "Response fits the trained style distribution."
+    evaluation_method: "perplexity"
+    weight: 0.7
+
+# ─── Pass Threshold ───────────────────────────────────────────────────────────
+
+pass_threshold:
+  # Minimum aggregate score for the run to count as passed.
+  # Applies per test category (static coverage, temporal persistence, etc.).
+  # Range: 0–1. Typical values: 0.70–0.80.
+  per_category: 0.75
+
+  # Minimum per-trait score in trait decomposition results.
+  # Defaults to per_category if not set.
+  per_trait: 0.65
+
+# ─── Temporal Settings ────────────────────────────────────────────────────────
+
+# Number of conversation turns for the temporal persistence test.
+# The model receives the same persona-defining system prompt and is evaluated
+# for behavioral consistency across this many turns.
+# Requires: sumi/harness/conversation.py (not yet implemented in Stage 1).
+temporal_turns: 20
+
+# ─── Metadata ─────────────────────────────────────────────────────────────────
+#
+# metadata is a free-form dict. Sumi reads specific keys for the stylometric
+# evaluator. All other keys are stored in the report as-is.
+
+metadata:
+  # Stylometric target values — used as defaults when a test case has no reference_text.
+  # The stylometric evaluator scores via exponential decay from these targets.
+  target_avg_sentence_length: 10.0    # mean word count per sentence
+  target_type_token_ratio: 0.65       # unique words / total words (vocabulary richness)
+  target_punctuation_density: 0.04    # fraction of characters that are punctuation
+
+  # pattern_mode controls PatternEvaluator logic globally.
+  # "violation" (default): patterns should NOT appear — any match = score 0.
+  # "inclusion": patterns SHOULD appear — at least one match = score 1.
+  # pattern_mode: "violation"
+
+  # Arbitrary fields — stored in report metadata, not used by the engine.
+  persona_name: "Your Persona Name"
+  persona_version: "1.0"
+  baseline_model: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+  created: "2026-01-01"
+  notes: >
+    Any notes about this scenario.
+    What is it testing? Which model versions does it apply to?

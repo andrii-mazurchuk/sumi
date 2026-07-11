@@ -94,12 +94,6 @@ class StylometricEvaluator(Evaluator):
         t_ttr = float(meta.get("target_type_token_ratio", self.DEFAULTS["target_type_token_ratio"]))
         t_pd = float(meta.get("target_punctuation_density", self.DEFAULTS["target_punctuation_density"]))
 
-        if test_case.reference_text:
-            ref = test_case.reference_text
-            t_asl = avg_sentence_length(ref)
-            t_ttr = type_token_ratio(ref)
-            t_pd = punctuation_density(ref)
-
         # Compute response features
         r_asl = avg_sentence_length(response)
         r_ttr = type_token_ratio(response)

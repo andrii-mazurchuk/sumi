@@ -6,6 +6,7 @@
 pydantic>=2.0
 pyyaml>=6.0
 click>=8.0  # CLI
+python-dotenv>=1.0  # load .env files
 
 # ML stack (install separately on GPU instance)
 # transformers>=4.40
@@ -17,7 +18,7 @@ click>=8.0  # CLI
 # torch>=2.2  # install via: pip install torch --index-url https://download.pytorch.org/whl/cu118
 
 # Evaluation
-# sentence-transformers>=2.7  # for embedding similarity evaluator
+sentence-transformers>=2.7  # for embedding similarity evaluator
 
 # LLM-as-judge
 anthropic>=0.25  # for Claude API judge
@@ -28,6 +29,8 @@ anthropic>=0.25  # for Claude API judge
 
 # Fine-tuning framework (on RunPod)
 # axolotl[flash-attn]  # install from source for latest version
+
+scikit-learn>=1.0  # for Bradley-Terry model fitting (sumi compare)
 
 # Testing
 pytest>=8.0

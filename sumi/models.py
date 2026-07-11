@@ -94,12 +94,15 @@ class TestCaseResult(BaseModel):
     passed: bool
     evaluator: str
     explanation: Optional[str] = None
+    skipped: bool = False
+    skip_reason: Optional[str] = None
 
 
 class StaticCoverageResult(BaseModel):
     test_case_results: List[TestCaseResult]
     aggregate_score: float
     passed: bool
+    confidence_interval: Optional[tuple[float, float]] = None  # (lower, upper) 95% CI
     baseline_comparison: Optional[float] = None  # score of non-fine-tuned baseline
 
 

@@ -1,124 +1,141 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working in this repository.
 
-## Project Overview
+## What This Project Is
 
-**Sumi** is a behavioral validation engine for fine-tuned LLMs — an academic diploma project (PJATK, thesis defense target: February 2027).
+**Sumi** is a behavioral evaluation engine for language models.
 
-**Core question:** Can efficient fine-tuning (LoRA, QLoRA, prompt tuning) specialize a small open-source LLM for behavioral goals, and can the robustness of that specialization be measured through structured behavioral persistence tests including adversarial resistance?
+It answers: *does this model actually behave the way it's supposed to?*
 
-**Sumi is the core contribution.** Fine-tuning uses existing tools (Axolotl, HuggingFace PEFT); Sumi is the novel validation engine built on top.
+You define a behavioral objective in a YAML scenario file. Sumi runs that scenario against any model — API-based (Claude, GPT-4o) or local (HuggingFace) — and produces a structured report: pass/fail per category, scores per trait, decay curves, adversarial resistance ratings.
 
-## Architecture
+Sumi is **model-agnostic**. It does not require fine-tuned models. It works on any model that can respond to a prompt.
 
-### Two Components
+**Academic context:** PJATK diploma thesis, defense target February 2027. The thesis uses Sumi to compare three versions of the same model (QLoRA fine-tuned, LoRA fine-tuned, system-prompted baseline) on a persona scenario. Fine-tuning is a research vehicle, not a Sumi feature.
 
-**1. Fine-Tuning Pipeline** (not the contribution — uses existing tools)
-- Base model: Llama 3.1 8B Instruct
-- Methods compared: QLoRA, LoRA, Prompt tuning
-- Tools: Axolotl, HuggingFace PEFT + TRL, BitsAndBytes
-- Tracking: Weights & Biases
-- Compute: Cloud GPU — RunPod RTX 4090 (JarvisLabs is defunct as of Q1 2026)
+## Two Build Stages
 
-**2. Sumi Validation Engine** (the core contribution)
-- Ingests user-defined YAML validation scenarios
-- Runs four test categories against fine-tuned models
-- Outputs structured JSON reports + rendered Markdown
+**Stage 1 — The Engine**
+Build Sumi: scenario format, evaluation pipeline, four test categories, report output. Ships with built-in scenarios. Users can define their own.
 
-### Sumi's Four Test Categories
+**Stage 2 — Research Paper**
+Run Sumi's comparative experiment: fine-tune Llama 3.1 8B on The Minimalist Analyst persona using QLoRA and LoRA, evaluate all three models (including system-prompted baseline) across all four Sumi test categories, write the thesis.
 
-| Category | What it measures |
+## Current State (2026-07-10)
+
+**Stage 1 complete.** All four test categories are implemented and wired end-to-end.
+
+### Built and wired (testable now)
+
+| File | Status |
 |---|---|
-| **Static Coverage** | Does the behavior appear at all? (stylometric analysis, LLM-as-judge, pattern matching) |
-| **Temporal Persistence** | Does it hold over long conversations? (decay curves, breakpoint detection) |
-| **Adversarial Robustness** | Does it hold under user pressure? (4 attack types: direct demand, gradual pressure, roleplay injection, logical challenge) |
-| **Trait Decomposition** | Which specific traits hold vs. break independently? |
+| `sumi/models.py` | Done — all Pydantic data models |
+| `sumi/scenario.py` | Done — YAML loader |
+| `sumi/evaluators/base.py` | Done — abstract interface |
+| `sumi/evaluators/stylometric.py` | Done — offline, no deps |
+| `sumi/evaluators/pattern.py` | Done — offline, aggregates all pattern_match traits |
+| `sumi/evaluators/llm_judge.py` | Done — Claude API judge, per-trait scoring |
+| `sumi/evaluators/embedding.py` | Done — cosine similarity via sentence-transformers |
+| `sumi/harness/model_harness.py` | Done — Claude + OpenAI backends; local HF stub (Stage 2) |
+| `sumi/tests/static_coverage.py` | Done — runs all test cases, bootstrap CI |
+| `sumi/runner.py` | Done — orchestrator; self-preference warning; judge provenance |
+| `sumi/reports/json_report.py` | Done — JSON serialization + terminal summary |
+| `sumi/reports/markdown_report.py` | Done — Markdown renderer; re-render from JSON |
+| `sumi/utils/metrics.py` | Done — bootstrap CI (numpy, seed-fixed) |
+| `sumi/utils/ranking.py` | Done — Bradley-Terry BT fitting + bootstrap CIs; `rank_reports()` + `find_statistical_ties()` |
+| `sumi/cli.py` | Done — `validate` + `report` + `compare` commands; `--adversarial` flag |
+| `sumi/__main__.py` | Done — `python -m sumi` entry point |
+| `sumi/adversarial/data/*.jsonl` | Done — 4 adversarial prompt libraries (data only) |
+| `sumi/adversarial/library.py` | Done — JSONL loader; `sample_prompts()` + `sample_sequences()` |
+| `sumi/tests/adversarial.py` | Done — `AdversarialRunner`; 3 standalone types + gradual_pressure with accumulated context; LLM judge scoring |
+| `sumi/harness/conversation.py` | Done — `ConversationHarness`; true multi-turn via `generate_turn()` with full history |
+| `sumi/tests/temporal.py` | Done — `TemporalRunner`; cycles test case prompts, scores per turn, builds `DecayCurve` |
+| `sumi/tests/trait_decomposition.py` | Done — `TraitDecompositionRunner`; synthesizes static/temporal/adversarial into per-trait profiles |
 
-### Validation Scenario Format (YAML)
-```yaml
-goal: what fine-tuning was supposed to achieve
-traits:
-  - behavioral rules (machine-testable)
-test_cases:
-  - prompt: ...
-    expected_behavior: ...
-    evaluation_method: stylometric | llm_judge | pattern_match | embedding_sim | perplexity
-pass_threshold:
-  per_category: 0.75
+### Scenario files
+
+| File | Status |
+|---|---|
+| `examples/scenarios/minimalist_analyst.yaml` | Done — primary thesis scenario (5 traits, 10 test cases) |
+| `examples/scenarios/minimalist_analyst_offline.yaml` | Done — stylometric + pattern_match only, no judge calls |
+| `examples/scenarios/minimalist_analyst_judge.yaml` | Done — llm_judge traits only, 5 test cases |
+| `examples/scenarios/_template.yaml` | Done — fully commented reference; not runnable |
+
+`ValidationReport` populates all four result types when the corresponding flags are passed. All categories are implemented.
+
+### What evaluation methods work end-to-end
+
+| Method | Works | Requires |
+|---|---|---|
+| `stylometric` | ✓ | nothing |
+| `pattern_match` | ✓ | nothing |
+| `llm_judge` | ✓ | `ANTHROPIC_API_KEY` in `.env` |
+| `embedding_sim` | ✓ | `pip install sentence-transformers` |
+| `perplexity` | ✗ (skipped) | not yet implemented |
+
+### Run commands
+
+```bash
+# Fast offline run (no judge, no embeddings)
+python -m sumi validate --scenario examples/scenarios/minimalist_analyst_offline.yaml \
+  --model claude-haiku-4-5-20251001 --no-judge
+
+# Full run with judge
+python -m sumi validate --scenario examples/scenarios/minimalist_analyst.yaml \
+  --model claude-haiku-4-5-20251001 --output report.json
+
+# Save as Markdown
+python -m sumi validate --scenario examples/scenarios/minimalist_analyst.yaml \
+  --model claude-haiku-4-5-20251001 --output report.md --format markdown
+
+# Re-render a saved JSON report as Markdown
+python -m sumi report report.json
+
+# Full run with adversarial robustness (requires ANTHROPIC_API_KEY)
+python -m sumi validate --scenario examples/scenarios/minimalist_analyst.yaml \
+  --model claude-haiku-4-5-20251001 --adversarial --output report.json
+
+# Full Stage 1 run — all four categories
+python -m sumi validate --scenario examples/scenarios/minimalist_analyst.yaml \
+  --model claude-haiku-4-5-20251001 --adversarial --temporal --decompose --output report.json
+
+# Compare multiple models via Bradley-Terry ranking (Stage 2 use case)
+python -m sumi compare qlora.json lora.json baseline.json
 ```
-
-### Evaluation Methods
-- **Stylometric classifier** — style/tone consistency
-- **LLM-as-judge** — Claude or GPT-4 API for open-ended evaluation
-- **Pattern matching / regex** — format compliance
-- **Embedding similarity** — semantic consistency
-- **Perplexity** — distribution fit on held-out text
-
-### Output
-Structured JSON + Markdown reports: pass/fail per category, behavioral decay curves, resistance scores per attack type, per-trait profiles, overall verdict with confidence.
 
 ## Tech Stack
 
-- **Language:** Python (compute/ML side) — this is the exception to default TS preference
-- **Fine-tuning:** HuggingFace PEFT + TRL, Axolotl
-- **Quantization:** BitsAndBytes
-- **Tracking:** Weights & Biases
-- **Evaluation:** Custom Sumi engine + HuggingFace Evaluate
-- **LLM-as-judge:** Claude API (`claude-sonnet-4-6`) or GPT-4
+- **Language:** Python — exception to default TS preference, ML ecosystem requires it
+- **Models:** Any HuggingFace model (local) or API model (Claude, GPT-4o)
+- **Fine-tuning (Stage 2 only):** Axolotl + HuggingFace PEFT + TRL + BitsAndBytes
+- **LLM-as-judge:** Claude API (`claude-haiku-4-5-20251001`) default; injectable at runtime
 - **Scenario format:** YAML
-- **Demo:** Gradio or CLI
-- **Compute:** Cloud GPU — RunPod RTX 4090 (community cloud, ~$0.44–0.74/hr)
-
-## Build Stages
-
-The project has 8 stages. Current status: **Stage 0 (Planning complete, no code yet).**
-
-1. Environment & Infrastructure — cloud GPU, Python env, HF/PEFT/BitsAndBytes/W&B, test inference
-2. Produce Input Models — generate QLoRA, LoRA, and system-prompted baseline models
-3. **Sumi Core: Scenario Format & Static Tests** — YAML parser, test runner, stylometric + LLM-as-judge + pattern matching, JSON reports
-4. Temporal Persistence Tests — multi-turn harness, decay curves, breakpoint detection
-5. Adversarial Library & Robustness Tests — 4 attack types, curated JSONL prompt library, resistance scoring
-6. Trait Decomposition — per-trait automated detection and profiles
-7. Full Comparative Experiment — run complete suite, visualizations, comparative analysis
-8. Thesis & Demo — write thesis, charts, CLI/Gradio demo, defense prep
-
-## Key Decisions Still Open
-
-- University supervisor approval of scope
-- Number of personas to validate (1 MVP minimum)
-- LLM-as-judge provider: Claude vs. GPT-4 vs. local model
-- Demo interface: CLI vs. Gradio web UI
-- Persona selection: see `docs/persona-selection.md` — recommendation is Custom Persona (Minimalist Analyst)
-
-## JAR Project & Task Tracking
-
-This repository corresponds to a JAR project named **"Musub Sumy"** (same name as this folder). All implementation tasks are tracked there as a hierarchical task architecture.
-
-Before starting any implementation work, check the JAR project for the current task breakdown, priorities, and progress. Use the `jar` skill or MCP tools (`mcp__jar__project_list`, `mcp__jar__project_tasks`) to query the task hierarchy. Follow the JAR task structure during implementation — it represents the agreed execution plan.
+- **Reports:** JSON + Markdown
+- **Embeddings:** `sentence-transformers` → `all-MiniLM-L6-v2`
+- **Statistics:** `numpy` (bootstrap CI); `scikit-learn` logistic regression (Bradley-Terry MLE, feature #10)
+- **Compute (Stage 2):** RunPod RTX 4090 (~$0.44–0.74/hr)
+- **Demo:** CLI primary, Gradio optional
 
 ## Docs
 
-All planning documents are in `docs/`:
+- `docs/project.md` — what Sumi is, the two stages, who it's for
+- `docs/architecture.md` — component map, pipeline, evaluators, what's built vs. next
+- `docs/scenarios.md` — scenario YAML format, evaluation methods, built-in scenarios
 
-**Architecture and specification:**
-- `diploma-project-overview.md` — full project specification (vision, architecture, research question)
-- `diploma-project-stages.md` — detailed stage breakdown with exit conditions per stage
-- `sumi-engine-architecture.md` — **code-level design** (Python module structure, interfaces, data models — start here for Stage 3)
+`docs/archive/` — old planning documents, kept for reference but superseded by the above.
 
-**Decision records:**
-- `diploma-project-decision.md` — decision log: what was decided, rejected, and why
-- `persona-selection.md` — **persona choice research**: 4 options analyzed, recommendation with academic rationale
-- `initial-plan.md` — **archived first-pass assumptions** (infrastructure, GPU, provider choices); partially incorrect — read to understand history, not as a guide
+## JAR Project
 
-**Implementation guides:**
-- `development-plan.md` — operational plan: hardware, software, where to test, where to deploy, stage roadmap
-- `adversarial-library.md` — **adversarial prompt library**: 53 seed prompts across 4 attack types with JSONL schema
-- `llm-judge-design.md` — **LLM-as-judge prompt engineering**: 4 templates, calibration protocol, cost estimates
+JAR project: **"Sumi"** (ID: 3). Tasks are created session-by-session as work is scoped. The docs above are the source of truth, not JAR.
 
-**Archived:**
-- `pc-build-report.md` — redirect stub, content in `initial-plan.md`
+## Key Decisions
 
-Read `diploma-project-overview.md` and `diploma-project-stages.md` for the research context.
-Read `sumi-engine-architecture.md` before writing any code.
-Read `persona-selection.md` before Stage 2 (persona decision is a blocker for dataset collection).
+- Persona for Stage 2: **The Minimalist Analyst** (custom-designed, synthetically generated dataset, ~5k pairs via Claude Haiku)
+- Model-agnostic from the start — `ModelHarness` supports both API and local models
+- All four Stage 1 test categories shipped: Static Coverage, Adversarial Robustness, Temporal Persistence, Trait Decomposition
+- Stage 1 is complete — ready to begin Stage 2 (fine-tuning experiment)
+- Features roadmap: `docs/features.md` — 28 features ordered by implementation sequence
+- `perplexity` evaluation method is declared in `models.py` but has no evaluator yet — test cases using it are silently skipped
+- Judge default: `claude-haiku-4-5-20251001`; override with `--judge-model`
+- Supervisor approval of thesis topic: still pending

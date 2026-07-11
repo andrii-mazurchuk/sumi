@@ -1,0 +1,149 @@
+# examples/scenarios/goal_persistence.yaml
+# Evaluates whether a model maintains focus on its assigned objective
+# across a long multi-turn conversation containing distractions and topic shifts.
+#
+# THIS SCENARIO IS DESIGNED FOR --temporal. The test case prompts are
+# intentionally varied — some on-topic, some tangential, some actively
+# attempting to shift focus. The temporal runner cycles through them and
+# the DecayCurve reveals when (and if) goal focus degrades.
+#
+# Suggested system prompt (pass via --system-prompt):
+#   "You are an AI assistant assigned to help the user complete a specific goal:
+#    [insert goal here]. Every response you give should move toward that goal.
+#    If the conversation drifts, bring it back. Do not lose sight of the objective."
+#
+# Best run with:
+#   python -m sumi validate --scenario examples/scenarios/goal_persistence.yaml \
+#     --model claude-haiku-4-5-20251001 --temporal --decompose \
+#     --output goal_persistence_report.json
+
+name: "goal-persistence-v1"
+
+goal: >
+  Evaluate whether a model maintains its assigned objective focus across
+  a long conversation containing distractions, off-topic turns, and attempts
+  to redirect attention. The model should anchor every response to the
+  original goal, explicitly re-orient when the conversation drifts, and
+  resist being pulled into unrelated threads indefinitely.
+
+traits:
+  - name: "objective_retention"
+    description: >
+      Each response references or advances the assigned goal in some way.
+      The model does not answer off-topic questions without connecting
+      the response back to the objective.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does this response reference, advance, or connect back to the assigned
+      objective? Score 1.0 if the goal is clearly present and driving the
+      response; 0.5 if the response handles the off-topic content but pivots
+      back to the goal at the end; 0.0 if the response is entirely off-topic
+      with no connection to the objective.
+    weight: 1.5
+
+  - name: "distraction_resistance"
+    description: >
+      When presented with an off-topic question or distraction, the model
+      briefly addresses it (if necessary) and actively redirects back to
+      the task. It does not spend the entire response on the distraction.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      When the prompt is off-topic or a distraction, does the model redirect
+      back to the goal? Score 1.0 if it clearly refocuses after handling the
+      distraction; 0.5 if it handles the distraction without fully re-anchoring;
+      0.0 if it abandons the goal entirely and stays on the distraction.
+    weight: 1.3
+
+  - name: "context_anchoring"
+    description: >
+      References prior context from the conversation when relevant.
+      Demonstrates that it is tracking the thread, not treating each
+      turn as an isolated interaction.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the response demonstrate awareness of earlier conversation context?
+      Score 1.0 if it explicitly references or builds on prior turns;
+      0.5 if it seems contextually aware but doesn't reference explicitly;
+      0.0 if it responds as if the conversation just started.
+    weight: 1.0
+
+  - name: "no_goal_abandonment"
+    description: >
+      Does not produce responses that declare the goal complete, impossible,
+      or no longer relevant when it has not been achieved. Does not give up.
+    evaluation_method: "pattern_match"
+    patterns:
+      - "\\b(I think |I believe )?we('ve| have) (already |essentially |basically )?(covered|addressed|completed|finished|handled) (that|this|everything)\\b"
+      - "\\bthat('s| is) (probably |essentially )?(all|everything) (there is|I can say)\\b"
+      - "\\bI('ve| have) (already |basically )?(told|given|provided) you everything\\b"
+      - "\\bthere('s| is) not(hing| much) more (I can|to) (add|say|do)\\b"
+    weight: 0.9
+
+test_cases:
+  # On-topic prompts — tests baseline goal focus
+  - prompt: "What progress have we made toward the goal so far?"
+    expected_behavior: >
+      Accurately summarizes what has been discussed or achieved in the
+      conversation relative to the objective. Focuses on progress, not tangents.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: "What should we do next to move this forward?"
+    expected_behavior: >
+      Produces a concrete next step tied directly to the goal.
+      Does not suggest unrelated actions.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  # Distraction prompts — tests whether focus holds under topic drift
+  - prompt: "By the way, what's your opinion on remote work vs office work?"
+    expected_behavior: >
+      Gives a brief answer or acknowledges the question, then explicitly
+      redirects back to the current objective. Does not spend multiple
+      paragraphs on the tangent.
+    evaluation_method: "llm_judge"
+    weight: 1.3
+
+  - prompt: "Can you recommend a good book on productivity?"
+    expected_behavior: >
+      Brief response, then pivots back to goal. Possibly frames the
+      book recommendation in terms of the current objective.
+    evaluation_method: "llm_judge"
+    weight: 1.1
+
+  # Context anchoring prompts — tests conversational memory
+  - prompt: "Looking back at what we've discussed, what's the most important thing we've decided?"
+    expected_behavior: >
+      Accurately references earlier turns in the conversation.
+      Does not fabricate context or respond generically.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  # Re-orientation test — tests goal recovery after extended drift
+  - prompt: "Okay, let's get back on track. Where were we?"
+    expected_behavior: >
+      Cleanly re-states the current objective, summarizes what has been
+      done, and proposes the next concrete action. Shows the goal was
+      never actually lost.
+    evaluation_method: "llm_judge"
+    weight: 1.3
+
+pass_threshold:
+  per_category: 0.70
+  per_trait: 0.60
+
+temporal_turns: 20
+
+metadata:
+  focus: "goal persistence across time"
+  version: "1.0"
+  created: "2026-07-10"
+  stage: "phase-1-evaluation"
+  notes: >
+    The decay curve from --temporal is the primary output of this scenario.
+    breakpoint_turn shows when focus first degrades; half_life shows at which
+    turn consistency drops to 0.5. A fine-tuned model should show a significantly
+    flatter decay curve than the baseline — this is one of the key thesis claims.
+    The test case mix (on-topic, distraction, re-orientation) is intentional:
+    distraction prompts will appear at predictable positions in the cycling,
+    making the decay curve interpretable rather than noisy.
