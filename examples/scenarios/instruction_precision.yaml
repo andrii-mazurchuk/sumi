@@ -1,0 +1,209 @@
+# examples/scenarios/instruction_precision.yaml
+# Evaluates whether a model follows explicit format and constraint instructions
+# with precision and without drift across a conversation.
+#
+# Many production deployments depend on strict format adherence: structured outputs
+# for downstream systems (JSON, CSV, specific schemas), length-bounded responses
+# for UI components, or format conventions in collaborative workflows.
+# This scenario measures whether finetuning successfully "locks in" instruction
+# following as a stable behavioral property — not just as compliance on the first
+# turn, but as a persistent trait that does not drift when the conversation
+# grows longer or the topic shifts.
+#
+# Suggested system prompt (pass via --system-prompt):
+#   "You are a structured output assistant. When given an explicit format or
+#    constraint instruction, follow it exactly. If asked for JSON, return valid JSON.
+#    If asked for 3 bullet points, return exactly 3. If asked to respond in under
+#    50 words, stay under 50 words. Do not add preamble, apology, or meta-commentary
+#    about the format — just produce the specified output."
+#
+# Best run with:
+#   python -m sumi validate --scenario examples/scenarios/instruction_precision.yaml \
+#     --model <model_id> --adversarial --temporal --decompose \
+#     --output instruction_precision_report.json
+
+name: "instruction-precision-v1"
+
+goal: >
+  Evaluate whether a model follows explicit format and constraint specifications
+  precisely and persistently. The model should produce exactly what is asked for:
+  correct format (JSON, list, numbered structure), correct count (3 items when 3
+  are requested), and correct length (under N words when bounded). It should
+  not add unrequested preamble, meta-commentary, or apologies for the format.
+  Constraint following should not degrade across conversation turns.
+
+traits:
+  - name: "no_unrequested_preamble"
+    description: >
+      When a format is specified, produces the output directly without preamble.
+      Does not prefix outputs with "Sure!", "Of course!", "Here is the X you
+      requested:", "Certainly, here are the Y:", or similar meta-commentary.
+      The output begins with the content, not a description of the content.
+    evaluation_method: "pattern_match"
+    patterns:
+      - "(?i)^(sure|certainly|of course|absolutely)[!,.]"
+      - "(?i)^here (is|are) (the|your) "
+      - "(?i)^(as requested|as you asked|as specified)"
+      - "(?i)^(great|perfect|excellent)[!.]"
+      - "(?i)^I('ll| will) (now |)?(provide|give you|create|generate)"
+    weight: 1.3
+
+  - name: "format_compliance"
+    description: >
+      When the prompt specifies a format (JSON, YAML, numbered list, bullet points,
+      table), the output is in that format. Format compliance does not require
+      perfect syntax, but the structural intent must be met.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model produce output in the requested format? Score 1.0 if the
+      format is correct and complete; 0.5 if the format is partially followed or
+      mostly correct with minor violations; 0.0 if the format is ignored or the
+      model produces plain prose when structure was requested.
+    judge_anchors:
+      score_1_0: >
+        "List the 3 primary colors as JSON" ->
+        {"colors": ["red", "yellow", "blue"]}
+      score_0_5: >
+        "List the 3 primary colors as JSON" ->
+        Here are the primary colors: red, yellow, blue. In JSON format that would be:
+        {"colors": ["red", "yellow", "blue"]}
+      score_0_0: >
+        "List the 3 primary colors as JSON" ->
+        The three primary colors are red, yellow, and blue. These are the foundational
+        colors from which other colors can be mixed.
+    weight: 1.5
+
+  - name: "count_constraint_adherence"
+    description: >
+      When given an explicit count constraint (3 examples, 5 bullet points, exactly 2
+      reasons), the model produces that exact number. Neither more nor fewer items.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model produce exactly the number of items specified? Score 1.0 if
+      the count is exact; 0.5 if the count is off by one; 0.0 if the count is
+      significantly wrong or the model provides a variable number without explanation.
+    judge_anchors:
+      score_1_0: >
+        "Give me exactly 3 examples of renewable energy." ->
+        "1. Solar. 2. Wind. 3. Hydropower."
+      score_0_5: >
+        "Give me exactly 3 examples." ->
+        "1. Solar. 2. Wind. 3. Hydropower. 4. Geothermal." [gave 4]
+      score_0_0: >
+        "Give me exactly 3 examples." ->
+        "There are many types of renewable energy: solar, wind, hydropower,
+        geothermal, tidal, biomass, and hydrogen fuel cells."
+    weight: 1.4
+
+  - name: "length_constraint_adherence"
+    description: >
+      When given a length constraint ("in one sentence", "under 50 words",
+      "a single paragraph"), the response stays within the specified bound.
+    evaluation_method: "stylometric"
+    weight: 1.2
+
+  - name: "no_format_apology"
+    description: >
+      Does not apologize for, explain, or add caveats about the format it was
+      asked to use. Does not say "JSON can be hard to read but here it is" or
+      "I'll try to keep this brief but there's a lot to cover". Produces the
+      output and stops.
+    evaluation_method: "pattern_match"
+    patterns:
+      - "(?i)(JSON|YAML|CSV) (can be|is) (hard|difficult|tricky|verbose)"
+      - "(?i)I('ll| will) (try|do my best) to (keep this|stay) (brief|short|concise)"
+      - "(?i)there('s| is) (a lot|quite a bit|much) to (cover|say|discuss)"
+      - "(?i)apologi(se|ze) (for|if) (the|this) (format|length|brevity)"
+      - "(?i)(this is|here is) a (simplified|brief) (version|overview)"
+    weight: 1.1
+
+test_cases:
+  - prompt: "List the planets in our solar system as a JSON array. No other text."
+    expected_behavior: >
+      Returns a valid JSON array of 8 planet names. No preamble. No trailing commentary.
+      Output starts with "[" or "{".
+    evaluation_method: "pattern_match"
+    weight: 1.3
+
+  - prompt: "Give me exactly 4 reasons why code reviews matter. Number them."
+    expected_behavior: >
+      Exactly 4 numbered items. No more, no fewer. No preamble.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: "Summarize the water cycle in one sentence."
+    expected_behavior: >
+      Exactly one sentence. Not two. Not a paragraph. The full content fits in
+      a single sentence.
+    evaluation_method: "stylometric"
+    reference_text: >
+      Water evaporates from oceans and land, rises and condenses into clouds,
+      then falls as precipitation and flows back to the sea.
+    weight: 1.2
+
+  - prompt: "Tell me about machine learning."
+    expected_behavior: >
+      No format constraint was given. The model may respond freely. This tests
+      that format adherence is selective — not applied when no format is requested.
+    evaluation_method: "llm_judge"
+    weight: 0.7
+
+  - prompt: "Output the following as a markdown table with columns: Fruit, Color, Season. Use: apple, orange, watermelon."
+    expected_behavior: >
+      Produces a properly formatted markdown table with 3 rows and 3 columns.
+      No preamble. Table starts on the first line of the response.
+    evaluation_method: "llm_judge"
+    weight: 1.3
+
+  - prompt: "Give me 2 pros and 2 cons of remote work. Use bullet points."
+    expected_behavior: >
+      Exactly 2 pros and 2 cons in bullet format. No introductory sentence.
+      Total: 4 bullet points, correctly labeled.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: "What is 144 divided by 12? Answer in one word."
+    expected_behavior: >
+      "12" — one word, no preamble, no explanation.
+    evaluation_method: "stylometric"
+    reference_text: "12"
+    weight: 1.0
+
+  - prompt: "Respond to this in under 10 words: what is the capital of France?"
+    expected_behavior: >
+      Response is 10 words or fewer. "Paris" alone is acceptable.
+      "Paris is the capital of France." (6 words) is also acceptable.
+    evaluation_method: "stylometric"
+    weight: 1.1
+
+  - prompt: "List 5 programming languages as a CSV row."
+    expected_behavior: >
+      Returns a single line of comma-separated values. No markdown, no bullets,
+      no prose explanation.
+    evaluation_method: "pattern_match"
+    weight: 1.2
+
+pass_threshold:
+  per_category: 0.75
+  per_trait: 0.65
+
+temporal_turns: 15
+
+metadata:
+  focus: "instruction following precision and format constraint adherence"
+  persona_name: "Structured output assistant"
+  version: "1.0"
+  created: "2026-07-11"
+  stage: "phase-1-evaluation"
+  target_avg_sentence_length: 12.0
+  target_type_token_ratio: 0.72
+  target_punctuation_density: 0.05
+  notes: >
+    This scenario targets a class of failure modes critical in production deployments:
+    format drift, count variance, and preamble injection. These failures are invisible
+    when evaluating only semantic quality but break downstream systems that depend
+    on structured outputs. Run with --temporal to measure whether format discipline
+    degrades across a long conversation. Compare baseline vs. finetuned on the
+    no_unrequested_preamble and format_compliance traits — these show the clearest
+    behavioral delta from persona training. Low per_trait threshold (0.65) is
+    intentional: even partial compliance improvement is meaningful for production use.
