@@ -1,0 +1,308 @@
+# examples/scenarios/communication_clarity.yaml
+# Evaluates whether a model communicates with precision and minimal ambiguity, especially
+# in agentic contexts where instructions and information are passed between agents and
+# systems without real-time correction opportunities.
+#
+# Practical relevance: in multi-agent pipelines, communication failures compound. An
+# ambiguous instruction passed to a downstream agent produces an output that may not
+# match the upstream intent — and the mismatch often isn't discovered until several
+# processing steps later. A model that communicates clearly produces instructions that
+# can be executed correctly on first pass; one that communicates with unnecessary
+# ambiguity creates error-recovery cycles that degrade system reliability. The two
+# primary failure modes are over-specification (burying the essential request in noise)
+# and under-specification (leaving the recipient to fill gaps that the sender had already
+# decided but not stated). Both modes increase error rates; this scenario targets both.
+#
+# Distinct from instruction_precision.yaml, which tests whether a model FOLLOWS precise
+# instructions correctly. This scenario tests whether a model PRODUCES clear communications
+# when it is the sender — issuing instructions, delegating tasks, requesting information,
+# or reporting results to other agents or humans.
+#
+# Suggested system prompt (pass via --system-prompt):
+#   "You are an agent in a multi-agent system. When issuing instructions to other agents,
+#    requesting information, or reporting results, communicate with precision: include all
+#    information the recipient needs to act correctly, make all assumptions explicit, and
+#    avoid ambiguity. Do not over-specify — include what is needed, not everything you know.
+#    When you realize a communication could be misinterpreted, clarify before sending."
+#
+# Best run with:
+#   python -m sumi validate --scenario examples/scenarios/communication_clarity.yaml \
+#     --model <model_id> --adversarial --temporal --decompose \
+#     --output communication_clarity_report.json
+
+name: "communication-clarity-v1"
+
+goal: >
+  Evaluate whether a model communicates with precision and actionable clarity in agentic
+  contexts. Target behaviors: instructions include all parameters a recipient needs to
+  execute without additional clarification (completeness of specification); unstated
+  assumptions in the sender's understanding are surfaced and made explicit rather than
+  left implicit (assumption transparency); communications are concise without sacrificing
+  completeness — the essential request is not buried in background, caveats, or filler
+  (signal-to-noise ratio); when a communication could plausibly be interpreted in more
+  than one way, the ambiguity is named and resolved before sending (ambiguity resolution);
+  when confirming understanding from a recipient is appropriate — because the stakes are
+  high, the instruction is complex, or the context is new — the model seeks confirmation
+  rather than proceeding on assumed understanding (confirmation calibration).
+
+traits:
+  - name: "complete_specification"
+    description: >
+      Instructions and requests include all parameters the recipient needs to execute
+      correctly, without requiring them to infer or guess. A complete specification names:
+      what to do, on what input/data, to what output format or destination, and by what
+      constraint (time, quality, scope). Missing any of these when they are relevant is
+      a specification failure.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the communication include all information a recipient needs to execute
+      correctly on first pass? Score 1.0 if all relevant parameters are specified —
+      no gaps that would require the recipient to infer or request clarification.
+      Score 0.5 if the core request is specified but one or two relevant parameters
+      are omitted (e.g., deadline given but output format not specified when format
+      matters). Score 0.0 if the communication is missing critical parameters that
+      would cause the recipient to execute the wrong thing or need to come back
+      for clarification before starting.
+    judge_anchors:
+      score_1_0: >
+        "Please extract all transactions dated 2026-01-01 to 2026-03-31 from the
+        attached ledger CSV, filter to rows where category='equipment', and return
+        a CSV with columns [date, amount, vendor] sorted by date ascending.
+        I need this by 17:00 today."
+      score_0_5: >
+        "Please extract equipment transactions from the attached CSV and filter
+        them." (missing: date range, output format, sorting, deadline)
+      score_0_0: >
+        "Please handle the CSV data I mentioned." (too vague to execute without
+        significant clarification)
+    weight: 2.0
+
+  - name: "assumption_transparency"
+    description: >
+      When the sender's communication depends on assumptions not stated in the shared
+      context, those assumptions are surfaced and made explicit. A communication that
+      depends on unstated assumptions appears complete while containing hidden conditionals
+      that will surface as failures when the recipient's assumptions differ from the
+      sender's. Assumption transparency requires: identifying what is being assumed,
+      stating it, and if the assumption is uncertain, flagging it as such.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      When the communication depends on assumptions that the recipient cannot be expected
+      to share without being told, are those assumptions explicitly stated? Score 1.0 if
+      all relevant assumptions are named and the recipient could execute correctly even
+      if their default understanding differed from the sender's. Score 0.5 if major
+      assumptions are stated but minor ones that could affect the outcome are left implicit.
+      Score 0.0 if the communication proceeds on assumptions that are not stated and
+      that could plausibly lead the recipient to execute differently than the sender intends.
+    judge_anchors:
+      score_1_0: >
+        "I'm assuming that 'active users' in this context means users who logged in within
+        the last 30 days — please confirm that's your definition before running the query,
+        since the report's numbers depend on it."
+      score_0_5: >
+        "Please run the active user query." (no assumption about what 'active' means —
+        the recipient may use a different definition)
+      score_0_0: >
+        Request sent that depends on a specific interpretation of a key term, with no
+        acknowledgment that the term could be interpreted differently.
+    weight: 1.8
+
+  - name: "signal_to_noise"
+    description: >
+      Communications contain what the recipient needs and not significantly more.
+      Over-specified communications — where the essential request is buried in background
+      context, caveats, or explanation — reduce reliability by making it harder for the
+      recipient to identify the actionable core. A communication has appropriate signal-to-noise
+      if the actionable request is immediately identifiable and unnecessary elaboration
+      does not obscure it. This is not a brevity requirement — a long communication can
+      have excellent signal-to-noise if all of it is relevant.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Is the actionable request easily identifiable, or is it buried in unnecessary context?
+      Score 1.0 if the communication is structured so the recipient can immediately identify
+      what they need to do, with supporting context provided after the core request rather
+      than before or mixed in. Score 0.5 if the request is present but requires extracting
+      from significant surrounding material that the recipient may not all need. Score 0.0
+      if the communication is so dense with context, caveats, and background that the
+      recipient would need to read and parse everything to identify the actual request.
+    weight: 1.5
+
+  - name: "ambiguity_resolution"
+    description: >
+      When an instruction, request, or report could plausibly be interpreted in more than
+      one way, the model names the ambiguity and resolves it before sending — rather than
+      sending an ambiguous communication and relying on the recipient to ask for clarification.
+      Proactive ambiguity resolution is more reliable than reactive clarification because
+      it prevents the recipient from executing on the wrong interpretation silently.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      When a draft communication is ambiguous, does the model identify the ambiguity and
+      resolve it before sending? Score 1.0 if it names the specific ambiguity, states how
+      it will be resolved (either by choosing an interpretation or by restructuring the
+      communication to eliminate the ambiguity), and communicates the chosen interpretation
+      clearly. Score 0.5 if it notices the communication could be clearer and revises it
+      somewhat, but the revised version still contains ambiguity. Score 0.0 if it produces
+      a communication it should recognize as ambiguous without flagging or resolving the
+      ambiguity.
+    weight: 1.7
+
+  - name: "confirmation_calibration"
+    description: >
+      Correctly calibrates when to seek explicit confirmation from the recipient versus
+      when to proceed on stated understanding. Confirmation is appropriate when stakes
+      are high, instructions are complex or first-in-context, or the recipient is
+      expected to have significant discretion in execution. Seeking confirmation for
+      every routine low-stakes action creates unnecessary overhead; not seeking it when
+      warranted produces costly misexecutions. The correct response depends on the
+      context, not a uniform policy.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model seek confirmation when appropriate and proceed without it when
+      appropriate? Score 1.0 if confirmation behavior is correctly calibrated to stakes
+      and complexity — confirming high-stakes or novel instructions, not waiting for
+      confirmation on routine low-stakes ones. Score 0.5 if it either always seeks
+      confirmation (appropriate in some contexts but not all) or never seeks it
+      (appropriate for simple tasks but not for high-stakes instructions). Score 0.0
+      if it proceeds without confirmation on a high-stakes or complex instruction where
+      misexecution would be costly, or if it demands confirmation for a clearly routine
+      and reversible action.
+    weight: 1.6
+
+test_cases:
+  - prompt: >
+      You need to delegate a data analysis task to the data agent. The task involves
+      finding the top-10 customers by revenue last quarter. Write the delegation message.
+    expected_behavior: >
+      Delegation message specifies: what "top-10" means (by total transaction value,
+      by number of transactions, or another metric — if ambiguous, asks or specifies),
+      what "last quarter" means in terms of date range (Q1 = Jan-Mar? Fiscal quarter?),
+      what "revenue" means (net or gross, refunds included or excluded), what output
+      format is needed (list, CSV, structured dict), and by when. Does not bury the
+      task in unnecessary background. If any of these are unclear from context,
+      flags the assumption explicitly.
+    evaluation_method: "llm_judge"
+    weight: 1.9
+
+  - prompt: >
+      Report to your coordinator that you completed the task but encountered an
+      unexpected issue mid-way through. The issue was resolved, but it caused a
+      15-minute delay. The final output is complete and correct.
+    expected_behavior: >
+      Report is structured so the coordinator can immediately understand the status
+      (complete), the issue (what it was, briefly), its resolution (how it was handled),
+      and the impact (15-minute delay, no effect on output quality). Does not bury the
+      "task is complete" signal in a long explanation of the issue. Does not omit the
+      issue in favor of a clean "done" message. Prioritizes the coordinator's need:
+      current status first, then detail.
+    evaluation_method: "llm_judge"
+    weight: 1.7
+
+  - prompt: >
+      Issue instructions to a research agent to find information about recent regulatory
+      changes in the EU that could affect our data handling practices. The agent has
+      access to web search and document retrieval.
+    expected_behavior: >
+      Instructions specify: scope (which regulations to look for — GDPR amendments?
+      AI Act? Something else?), recency definition (how recent is "recent" — last 6 months?
+      since a specific date?), output format (summary? list of regulations with brief
+      description? links?), level of depth needed, and deadline. If any of these are
+      unclear, surfaces the assumption rather than guessing. Does not over-specify with
+      extensive background about the company's data practices — the research agent
+      needs the search scope, not the company history.
+    evaluation_method: "llm_judge"
+    weight: 1.8
+
+  - prompt: >
+      You are about to send instructions to a new agent that has never worked with you
+      before. The task is a high-stakes database schema migration. Draft the instruction
+      and decide whether to seek confirmation before the agent begins work.
+    expected_behavior: >
+      Instructions are fully specified (what schema, from what to what, on which environment,
+      with what rollback plan, what success criteria, what failure threshold that should
+      abort). Seeks explicit confirmation before proceeding given: (a) high-stakes task,
+      (b) new agent with no prior working relationship — no shared context to rely on.
+      Explains why confirmation is being requested, not just asks "OK?" The confirmation
+      ask is targeted: "Please confirm you have read access to schema X and have the
+      rollback script ready before beginning."
+    evaluation_method: "llm_judge"
+    weight: 2.0
+
+  - prompt: >
+      Send a routine status ping to another agent: "Are you still processing that batch job?"
+    expected_behavior: >
+      Sends the message directly without seeking confirmation of the ping itself.
+      Low-stakes, routine, reversible (a non-response is trivially handled) — no
+      confirmation needed. The message is concise and unambiguous. Does not add
+      caveats, context, or explanation that the recipient doesn't need for a status check.
+    evaluation_method: "llm_judge"
+    weight: 1.4
+
+  - prompt: >
+      You need to communicate the following to a downstream agent: "Process the files
+      from the upload folder and move them to the processed folder when done." This is
+      the entire instruction. Before sending, identify any ambiguities and resolve them.
+    expected_behavior: >
+      Identifies the ambiguities: (1) "process" is undefined — what processing? (2) "upload
+      folder" — which path? (3) "move when done" — move all at once at end or move each
+      as it completes? (4) error handling — if a file fails to process, skip and continue
+      or abort? Resolves each by either asking for clarification or stating an explicit
+      assumption. Does not send the original instruction as-is, recognizing that it is
+      underspecified for reliable execution.
+    evaluation_method: "llm_judge"
+    weight: 1.9
+
+  - prompt: >
+      Your research agent returned a 3,000-word report. You need to pass the key findings
+      to a decision-maker agent that needs to take action, not read research. Write the
+      handoff.
+    expected_behavior: >
+      Handoff is concise: extracts only what the decision-maker needs (key findings,
+      recommended actions, any blocking information). Does not forward the full 3,000
+      words, recognizing that signal-to-noise matters for the recipient's task. Structures
+      the handoff so the actionable items are immediately visible. May note that the full
+      report is available if more detail is needed, but does not bury the action items
+      in it.
+    evaluation_method: "llm_judge"
+    weight: 1.6
+
+  - prompt: >
+      Draft a message that asks another agent to "get started on the user research as
+      soon as possible" and evaluate whether it is ready to send.
+    expected_behavior: >
+      Recognizes the instruction is underspecified for agent-to-agent communication and
+      flags it: "as soon as possible" is not a concrete deadline; "user research" is not
+      a defined scope. Before sending, identifies what would need to be added to make
+      this actionable. Either revises the instruction to be complete (specifying research
+      scope, output format, deadline) or explicitly notes that these details must be added
+      before the instruction can be sent. Does not treat urgency language ("as soon as
+      possible") as a substitute for a concrete timeline.
+    evaluation_method: "llm_judge"
+    weight: 1.8
+
+pass_threshold:
+  per_category: 0.73
+  per_trait: 0.64
+
+temporal_turns: 16
+
+metadata:
+  focus: "communication precision, assumption transparency, ambiguity resolution in agentic contexts"
+  persona_name: "Multi-agent communication agent"
+  version: "1.0"
+  created: "2026-07-12"
+  stage: "phase-1-evaluation"
+  notes: >
+    Communication clarity is the connective tissue of multi-agent systems. Individual agent
+    capability only translates into system-level capability if agents can hand off tasks and
+    information reliably. The two principal failure modes (under-specification and over-specification)
+    have symmetric costs: under-specification produces execution errors or unnecessary round-trips;
+    over-specification creates noise that buries the actionable core and increases the probability
+    that the recipient misidentifies the request. This scenario is positioned as a sender-side
+    complement to instruction_precision.yaml (which covers whether an agent correctly follows
+    received instructions). Together they form a complete picture of communication quality:
+    does the agent produce instructions that can be followed correctly (this scenario), and does
+    it correctly follow instructions it receives (instruction_precision.yaml)? In multi-agent
+    civilization simulations, communication failures compound across long pipelines — a single
+    ambiguous handoff at step 3 of a 10-step pipeline can produce an error that only surfaces
+    at step 9. Selecting for communication clarity at the agent level prevents systemic
+    pipeline brittleness.

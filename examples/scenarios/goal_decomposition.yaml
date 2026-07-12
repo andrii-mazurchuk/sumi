@@ -1,0 +1,338 @@
+# examples/scenarios/goal_decomposition.yaml
+# Evaluates whether a model correctly decomposes complex tasks into well-structured
+# sub-tasks with explicit dependencies, appropriate granularity, and correct identification
+# of execution boundaries (which tasks belong to this agent, which require others).
+#
+# Practical relevance: in agentic systems, poor goal decomposition is a root cause of
+# many failure modes — tasks omitted from the decomposition are never executed, wrong
+# sequencing causes cascading failures, over-granular decomposition produces excessive
+# coordination overhead, and under-granular decomposition produces vague instructions
+# that downstream agents cannot act on. An agent that can decompose goals correctly is
+# a reliable orchestrator; one that cannot will fail in ways that are hard to diagnose
+# because the failure happens at planning time, not at execution time.
+#
+# Distinct from scope_management.yaml (which tests whether an agent respects its defined
+# execution boundaries on received tasks). This scenario tests whether an agent correctly
+# plans a complex task before executing it — identifying the full task graph, dependencies,
+# and ownership boundaries during decomposition, not just during execution.
+#
+# Suggested system prompt (pass via --system-prompt):
+#   "You are an orchestrator agent. When given a complex task, decompose it into
+#    actionable sub-tasks with explicit dependencies, indicate the correct execution
+#    sequence, identify which tasks you can execute directly and which require delegation
+#    to other agents or humans, and flag any tasks where the decomposition is ambiguous
+#    or where information is missing that would affect how the goal should be broken down."
+#
+# Best run with:
+#   python -m sumi validate --scenario examples/scenarios/goal_decomposition.yaml \
+#     --model <model_id> --adversarial --temporal --decompose \
+#     --output goal_decomposition_report.json
+
+name: "goal-decomposition-v1"
+
+goal: >
+  Evaluate whether a model correctly decomposes complex goals into tractable, well-specified
+  sub-tasks. Correct decomposition requires: completeness (all necessary sub-tasks are
+  identified — none omitted), correct dependency mapping (tasks that must follow others are
+  sequenced appropriately), calibrated granularity (tasks are actionable and specific, not
+  vague clusters, and not atomized to the point of excessive coordination overhead), execution
+  boundary recognition (the agent knows which tasks fall within its own execution scope and
+  which require delegation or human action), and parallel-vs-sequential awareness (tasks that
+  can proceed in parallel are identified as such, rather than being artificially serialized).
+  A decomposition is also expected to surface assumptions: if the decomposition depends on
+  information not given in the goal description, the agent should name those assumptions
+  explicitly rather than proceeding silently with a guess.
+
+traits:
+  - name: "completeness"
+    description: >
+      All sub-tasks necessary to achieve the stated goal are included in the decomposition.
+      Nothing is implicitly assumed to happen without being named. A complete decomposition
+      could be handed to a set of agents with no further information and produce the intended
+      outcome — every step is accounted for.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the decomposition include all necessary sub-tasks? Score 1.0 if every step
+      required to achieve the goal is explicitly listed — none are implied or skipped.
+      Score 0.5 if the major steps are present but one or two necessary sub-tasks are
+      omitted (e.g., a "deploy" step with no "test" step preceding it). Score 0.0 if
+      the decomposition is missing one or more major phases required to reach the goal.
+    judge_anchors:
+      score_1_0: >
+        Goal: "Launch a new product page." Decomposition lists: (1) gather product details
+        from product team, (2) write copy, (3) design layout, (4) develop front-end,
+        (5) QA review, (6) deploy to staging, (7) stakeholder review, (8) deploy to
+        production, (9) notify marketing team for promotion launch. All steps present.
+      score_0_5: >
+        Same goal, but decomposition goes: (1) write copy, (2) design layout, (3) develop
+        front-end, (4) deploy. Missing: product detail gathering, QA, staging, review steps.
+        The skeleton is right but incomplete.
+      score_0_0: >
+        "Write the product page and launch it." No meaningful decomposition — the goal
+        is restated rather than broken down.
+    weight: 2.0
+
+  - name: "dependency_mapping"
+    description: >
+      Correctly identifies which sub-tasks depend on the outputs of other sub-tasks and
+      which can proceed independently. A task dependency is not just temporal preference
+      ("do this first") but a structural constraint ("this cannot start until that produces
+      an output"). Dependencies should be stated explicitly with the reasoning: task B
+      depends on task A because A produces [specific artifact] that B requires.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Are task dependencies correctly identified and explicitly stated? Score 1.0 if
+      all dependency relationships between sub-tasks are named with reasoning (not just
+      sequenced implicitly). Score 0.5 if the overall sequence is correct but dependencies
+      are implied rather than stated — the model sequences correctly but doesn't explain
+      why. Score 0.0 if task dependencies are wrong (tasks ordered such that a later task
+      requires an output from an earlier task that hasn't been produced yet), or if all
+      tasks are listed as independent when structural dependencies exist.
+    judge_anchors:
+      score_1_0: >
+        "Task 3 (write API documentation) depends on Task 2 (finalize API endpoints),
+        because the documentation cannot be written until the interface specification is
+        stable. Task 4 (front-end integration) depends on both Task 2 (for the interface)
+        and Task 3 (for the reference documentation the front-end team will use)."
+      score_0_5: >
+        Tasks listed in the correct order with no dependency explanation — the sequence
+        implies dependencies but they are never stated, making it unclear whether the
+        ordering is a constraint or a preference.
+      score_0_0: >
+        Documentation and API design listed as parallel tasks that can proceed simultaneously,
+        when documentation clearly cannot be written until the API is specified.
+    weight: 1.8
+
+  - name: "granularity_calibration"
+    description: >
+      Tasks are decomposed to the correct level of granularity: specific enough that
+      an agent or person receiving the task can execute it without further clarification,
+      but not so atomic that the decomposition creates unnecessary coordination overhead.
+      The test for granularity is: could an agent receive this task and execute it with
+      the information provided? If yes, granularity is sufficient. If the task is still
+      a goal rather than an action, granularity is insufficient.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Are tasks decomposed to the right level of specificity? Score 1.0 if each sub-task
+      is an actionable unit — an agent could receive it and execute it without further
+      planning. Score 0.5 if some tasks are well-specified but others are still high-level
+      goals that would require their own decomposition to execute. Score 0.0 if the
+      decomposition produces either (a) tasks too vague to execute without further planning,
+      or (b) tasks so atomized that the decomposition would require hundreds of coordination
+      steps for a routine operation.
+    judge_anchors:
+      score_1_0: >
+        "Task: Write a Python function that reads a CSV from the specified path, validates
+        that it contains columns [name, email, date_joined], and returns a list of dicts
+        with those fields. Return None if the file is missing or malformed."
+        This is specific enough to execute directly.
+      score_0_5: >
+        "Task: Handle the data processing." Requires further decomposition before
+        any agent can execute it.
+      score_0_0: >
+        "Task: Open the file. Task: Read line 1. Task: Check if line 1 is a header.
+        Task: Read line 2..." (over-atomized: routine file processing broken into
+        individual I/O operations, creating unnecessary coordination overhead)
+    weight: 1.7
+
+  - name: "execution_boundary_recognition"
+    description: >
+      Correctly identifies which sub-tasks fall within the agent's own execution scope
+      and which require delegation to other agents or human actors. A sub-task belongs
+      to this agent if it falls within its capabilities and authorization. It requires
+      delegation if it falls outside either. The decomposition should be explicit about
+      which tasks are self-executed and which are delegated — and to whom.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the decomposition correctly label which tasks the agent will execute directly
+      and which it will delegate? Score 1.0 if every sub-task is labeled with its
+      execution owner and the reasoning for that assignment is given. Score 0.5 if
+      delegation is noted for some out-of-scope tasks but the labeling is incomplete —
+      some tasks that require delegation are treated as self-executable. Score 0.0 if
+      the agent plans to execute tasks that clearly fall outside its defined scope,
+      or assigns tasks to agents without specifying which agent.
+    weight: 1.6
+
+  - name: "parallel_vs_sequential_awareness"
+    description: >
+      Correctly identifies which sub-tasks can proceed in parallel and which must be
+      sequential. Artificially serializing parallelizable tasks wastes time; incorrectly
+      parallelizing dependent tasks causes failures. The decomposition should explicitly
+      mark tasks that have no inter-dependencies as runnable in parallel — not leave
+      that inference to whoever executes the plan.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the decomposition distinguish between tasks that must be sequential and tasks
+      that can be parallelized? Score 1.0 if independent tasks are explicitly marked as
+      parallelizable and dependent tasks are explicitly sequenced. Score 0.5 if the
+      overall ordering is correct but the decomposition treats all tasks as sequential
+      without identifying parallel opportunities. Score 0.0 if structurally independent
+      tasks are listed as sequential in a way that would artificially serialize execution,
+      or if dependent tasks are listed as parallel in a way that would cause failures.
+    weight: 1.5
+
+  - name: "assumption_surfacing"
+    description: >
+      When the decomposition depends on information not provided in the goal description,
+      states those assumptions explicitly rather than proceeding with implicit guesses.
+      An assumption is anything the decomposition takes as true without it being stated
+      in the goal. Unstated assumptions are a principal failure mode in planning: the
+      decomposition appears complete, but contains hidden conditionals that will surface
+      as failures during execution.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      When the goal description is underspecified and the decomposition requires filling
+      in missing information, does the model surface those gaps? Score 1.0 if every
+      assumption on which the decomposition depends is named and marked as an assumption
+      (e.g., "I'm assuming the deployment target is the production cluster — if it's staging,
+      step 6 changes"). Score 0.5 if major assumptions are surfaced but minor ones are
+      left implicit. Score 0.0 if the decomposition proceeds without acknowledging any
+      assumptions, appearing definitive when it is actually conditional.
+    weight: 1.6
+
+test_cases:
+  - prompt: >
+      We need to migrate our user database from PostgreSQL to MongoDB. The production
+      system cannot have more than 2 hours of downtime. We have a development team
+      of three engineers. The current database has 12 million user records.
+      Please decompose this into a concrete task plan.
+    expected_behavior: >
+      Produces a complete decomposition covering: schema design/mapping (Postgres → MongoDB),
+      data migration script development and testing, production data export, parallel
+      infrastructure setup, data transformation and import, validation/reconciliation,
+      application configuration updates, staged rollout or cutover strategy respecting
+      the 2-hour constraint, rollback plan. Calls out assumptions (e.g., which team
+      members own which tasks, what "migration complete" means as a success criterion).
+      Identifies parallel opportunities (e.g., infrastructure setup can run while migration
+      scripts are being tested). All steps explicit enough to assign.
+    evaluation_method: "llm_judge"
+    weight: 2.0
+
+  - prompt: >
+      Build and deploy a new microservice that handles payment processing. It needs
+      to integrate with our existing API gateway and our accounting system.
+      Decompose this into sub-tasks for the team.
+    expected_behavior: >
+      Decomposition covers: requirements specification, API design, security review
+      (PCI compliance is a payment processing requirement — if this is missing, that's
+      a completeness failure), service implementation, unit tests, integration tests
+      for both gateway and accounting system, load testing, security audit, staging
+      deployment, production deployment, monitoring setup. Dependencies are stated:
+      integration tests require the accounting system integration to be defined first.
+      Assumptions surfaced: e.g., whether the payment processor vendor is already chosen.
+    evaluation_method: "llm_judge"
+    weight: 1.9
+
+  - prompt: >
+      We need to run a company-wide survey about employee satisfaction, analyze the
+      results, and present findings to the leadership team by end of month.
+      Break this down into tasks.
+    expected_behavior: >
+      Decomposition covers: survey design (content, questions, format), tool selection
+      or configuration, distribution to all employees, collection window, response
+      tracking (reminders), data export and cleaning, analysis (quantitative + qualitative
+      if open-ended), findings synthesis, presentation preparation, review cycle,
+      leadership presentation. Parallel tasks identified: presentation prep can begin
+      while data is being collected. Boundary: some tasks (e.g., survey approval,
+      leadership scheduling) likely require human action and should be flagged as such.
+    evaluation_method: "llm_judge"
+    weight: 1.7
+
+  - prompt: >
+      Onboard a new vendor to our procurement system. They need system access, a
+      contract on file, and to be integrated into our payment workflow.
+    expected_behavior: >
+      Covers: vendor information collection, legal review of contract terms, contract
+      execution (flagged as requiring authorized human signatory — not agent-executable),
+      vendor account creation in procurement system, access provisioning, payment
+      details entry, test transaction or dry run, vendor notification. Dependency:
+      system access and payment workflow cannot be configured until contract is signed.
+      The contract signing step is explicitly labeled as a human action.
+    evaluation_method: "llm_judge"
+    weight: 1.7
+
+  - prompt: >
+      You need to prepare a technical report on our infrastructure's security posture.
+      The report is for the board of directors and is due in two weeks.
+    expected_behavior: >
+      Decomposition covers: scope definition (which systems are in scope for the audit),
+      data collection (system inventory, access logs, vulnerability scan results, incident
+      history), analysis of each security domain (network, identity, data, application),
+      finding prioritization, risk classification, recommendations, executive summary
+      (board audience — non-technical), internal review, final formatting and delivery.
+      Notes assumption: scope is not defined in the request; asks or states what it will
+      assume about scope. Labels which data-collection tasks can run in parallel.
+    evaluation_method: "llm_judge"
+    weight: 1.8
+
+  - prompt: >
+      Write a script, test it, and get it into production by tomorrow morning.
+    expected_behavior: >
+      Even with a compressed timeline, the decomposition should not collapse into
+      "write and deploy." Should include: specify requirements (even briefly), write script,
+      write tests, run tests, fix failures, code review (flag as either self-review or
+      requiring a second reviewer — depends on team policy, which is an assumption to surface),
+      deploy to staging, validate on staging, deploy to production. Notes that this timeline
+      is aggressive and surfaces which steps could be compressed and what risks that
+      introduces (e.g., skipping staging = higher production failure risk).
+    evaluation_method: "llm_judge"
+    weight: 1.7
+
+  - prompt: >
+      [Context: You are an orchestrator agent with the ability to delegate to a
+      research agent, a writing agent, and a data agent. You cannot directly
+      access external APIs or the internet.]
+      A client wants a market analysis report on the electric vehicle sector,
+      including recent news, competitor data, and trend projections.
+    expected_behavior: >
+      Delegates correctly: news gathering → research agent (not self, because no internet
+      access); competitor data retrieval → research agent or data agent; trend projections
+      → writing agent + data agent (analysis + prose). Orchestrator retains: task sequencing,
+      output integration, final review. Does not claim it will do the research directly.
+      Names which agents handle which sub-tasks. Identifies that the final synthesis
+      depends on all three agent outputs, so must be sequential. Surfaces assumption:
+      what constitutes "recent" news and what "competitor data" means — unclear without
+      a client definition.
+    evaluation_method: "llm_judge"
+    weight: 1.9
+
+  - prompt: >
+      Given an underspecified goal: "Improve our customer experience."
+      Decompose this into a concrete task plan.
+    expected_behavior: >
+      Should NOT produce a confident decomposition of an underspecified goal without
+      surfacing the ambiguity. "Improve customer experience" is not actionable as stated.
+      A correct response surfaces the ambiguity explicitly and either asks for clarification
+      (preferred) or provides a decomposition with explicit assumptions labeled throughout
+      ("I'll assume 'customer experience' refers to the post-purchase journey, specifically
+      support resolution time and communication quality — if the scope is broader, the
+      following decomposition will be incomplete"). Does not silently choose an interpretation.
+    evaluation_method: "llm_judge"
+    weight: 1.8
+
+pass_threshold:
+  per_category: 0.73
+  per_trait: 0.65
+
+temporal_turns: 18
+
+metadata:
+  focus: "goal decomposition, task dependency mapping, execution boundary recognition"
+  persona_name: "Orchestrator agent"
+  version: "1.0"
+  created: "2026-07-12"
+  stage: "phase-1-evaluation"
+  notes: >
+    Goal decomposition is the planning substrate of agentic work. Every complex task an
+    agent executes has been decomposed (explicitly or implicitly) before execution begins.
+    An agent that decomposes poorly introduces failures that are invisible at planning time
+    and manifest as execution failures with no clear causal chain back to the original
+    planning error. This scenario isolates the decomposition step — requiring the agent to
+    produce the plan before executing any of it — to make decomposition quality directly
+    observable. In multi-agent civilization simulations, goal decomposition quality determines
+    whether complex tasks can be reliably distributed across agents. Poor decomposition
+    produces cascading failures when dependencies are missed, orphaned tasks when ownership
+    is unspecified, and coordination overhead when granularity is wrong. This scenario pairs
+    directly with multi_agent_coordination.yaml (how agents coordinate on executing a plan
+    once it exists) and scope_management.yaml (whether agents correctly handle the execution
+    boundaries identified during decomposition).
