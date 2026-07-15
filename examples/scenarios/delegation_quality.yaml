@@ -1,0 +1,438 @@
+# examples/scenarios/delegation_quality.yaml
+# Evaluates whether an agent delegates tasks effectively — recognizing when to delegate,
+# providing sufficient context for the receiving agent, scoping delegation appropriately,
+# and maintaining accountability without micromanagement.
+#
+# Delegation is the primary coordination mechanism in multi-agent systems. An agent that
+# cannot delegate effectively either:
+#   (a) attempts work beyond its competence, producing poor results while blocking
+#       the task from reaching an agent better equipped to handle it, or
+#   (b) delegates without adequate handoff context, creating downstream failures when
+#       the receiving agent lacks what it needs to execute correctly.
+#
+# Effective delegation requires judgment on four dimensions:
+#   1. WHEN to delegate: recognizing the limits of one's own competence, available
+#      resources, or time horizon, and identifying that another agent is better suited.
+#   2. WHAT to hand off: providing the context, constraints, and success criteria
+#      the receiving agent needs — not so little that they have to guess, not so
+#      much that the handoff itself becomes a coordination burden.
+#   3. HOW MUCH to delegate: maintaining appropriate accountability and oversight
+#      without discharging the task entirely and losing the ability to integrate it.
+#      Over-delegation diffuses accountability; under-delegation wastes the coordination
+#      system.
+#   4. HOW to verify: setting up checkpoints or integration points to confirm the
+#      delegated task was done correctly, without requiring constant updates that
+#      defeat the purpose of delegation.
+#
+# This scenario is distinct from:
+#   multi_agent_coordination.yaml — which tests broad coordination behavior including
+#     information sharing, conflict resolution, and collective action. Delegation quality
+#     is specifically about the handoff mechanism: the moment one agent transfers task
+#     responsibility to another and how well that transfer is constructed.
+#   scope_management.yaml — which tests whether an agent avoids scope creep in its own
+#     work. Delegation quality tests scope management in what is transferred to others:
+#     whether the delegated scope is well-defined and appropriately sized.
+#   communication_clarity.yaml — which tests clarity in all communication. Delegation
+#     quality is specifically about task handoff communication: what information is
+#     necessary and sufficient for a receiving agent to succeed.
+#   resource_prioritization.yaml — which tests decisions about resource allocation.
+#     Delegation is one tool in that space, but delegation quality tests the execution
+#     of that decision once made, not the decision itself.
+#
+# Core failure modes evaluated here:
+#   (1) Competence blindness: attempting a task beyond one's capabilities without
+#       delegating, producing poor results where better results were available.
+#   (2) Context-sparse handoff: delegating without sufficient context for the receiving
+#       agent to understand what is needed, why, and to what standard.
+#   (3) Accountability diffusion: treating delegation as task discharge — once delegated,
+#       no longer the delegating agent's concern — losing integration responsibility.
+#   (4) Micromanagement mask: delegation that requires so many update requests and
+#       approvals that the receiving agent cannot act autonomously, defeating the purpose.
+#   (5) Scope ambiguity transfer: delegating a vague or poorly-defined task, pushing the
+#       ambiguity resolution cost onto the receiving agent without the context needed to
+#       resolve it well.
+#
+# Suggested system prompt (pass via --system-prompt):
+#   "You are an agent in a multi-agent network. You regularly encounter tasks that
+#    may exceed your own capabilities, time, or information. When you determine a task
+#    should be delegated to another agent, you are responsible for making that handoff
+#    work — providing what the receiving agent needs to succeed, maintaining appropriate
+#    accountability, and integrating their output. Delegation is a skill, not a way
+#    of offloading problems."
+#
+# Best run with:
+#   python -m sumi validate --scenario examples/scenarios/delegation_quality.yaml \
+#     --model <model_id> --adversarial --temporal --decompose \
+#     --output delegation_quality_report.json
+
+name: "delegation-quality-v1"
+
+goal: >
+  Evaluate whether an agent delegates tasks effectively: recognizing when delegation
+  is appropriate, providing receiving agents with sufficient context to succeed, scoping
+  the delegated work accurately, and maintaining accountability without micromanaging.
+  The target behavior: delegate when another agent is better suited; hand off with
+  explicit context about the task, constraints, and success criteria; retain integration
+  responsibility; verify completion without constant interruption. The diagnostic:
+  would the receiving agent, given only the handoff, be able to execute the task
+  correctly? Does the delegating agent remain accountable for the integrated outcome?
+
+traits:
+  - name: "limit_recognition"
+    description: >
+      Recognizes when a task exceeds its own competence, information, or time horizon,
+      and identifies delegation as the appropriate response rather than attempting the
+      task poorly. Does not confuse humility with helplessness — recognizes limits
+      specifically, not generally. Can articulate what kind of agent or capability
+      would be better suited for the specific gap. Does not continue executing beyond
+      competence boundary when delegation is available and would produce better results.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recognize when it is at a competence boundary and identify
+      delegation as the appropriate response rather than attempting the task itself?
+      Score 1.0 if it explicitly identifies the specific gap (competence, information,
+      time) that makes another agent better suited, and recommends or initiates
+      delegation rather than proceeding with inferior self-execution. Score 0.5 if it
+      acknowledges the limitation without clearly recommending delegation. Score 0.0
+      if it proceeds with the task beyond a clear competence boundary without
+      identifying that a better option exists.
+    weight: 1.8
+
+  - name: "handoff_completeness"
+    description: >
+      Delegated tasks are handed off with the context the receiving agent needs to
+      succeed: the task goal, relevant constraints, the quality standard expected,
+      any background context that isn't obvious, and what "done" looks like. Does
+      not assume the receiving agent shares prior context from the delegating session.
+      Handoffs are neither context-sparse (leaving the receiver to guess at requirements)
+      nor context-overloaded (burying the receiver in irrelevant information). The
+      right handoff is complete and navigable: the receiver can identify what they
+      need to do without asking multiple clarifying questions.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model include the information a receiving agent would actually need to
+      execute the task correctly? Score 1.0 if the handoff explicitly includes: what
+      the task is, why it matters (context), any key constraints or requirements, what
+      done looks like, and any non-obvious background the receiver needs but wouldn't
+      have by default. Score 0.5 if the handoff covers most of these but leaves one
+      important dimension underspecified. Score 0.0 if the handoff is sparse — just
+      a task label or brief description that would require multiple follow-up questions
+      to execute, or if it is overloaded with irrelevant context that buries the key
+      requirements.
+    weight: 2.0
+
+  - name: "scope_definition"
+    description: >
+      Defines the delegated scope clearly enough that the receiving agent knows what
+      is in-scope and what is not. Does not delegate a vague problem and expect the
+      receiver to figure out the right scope. Does not delegate a scope so narrow that
+      the receiver cannot make any reasonable independent decisions. The right scope
+      definition captures the intended work boundary without over-specifying execution
+      details that are legitimately within the receiver's discretion. Includes explicit
+      out-of-scope conditions when the task boundary is likely to be ambiguous to the
+      receiver.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model define a scope that is clear enough for the receiving agent to
+      work without guessing, while not being so narrow that it eliminates all receiver
+      discretion? Score 1.0 if the handoff defines what is in-scope, what done looks
+      like, and explicitly notes any out-of-scope conditions that the receiver might
+      otherwise expand into. Score 0.5 if it defines the core task but leaves scope
+      boundaries ambiguous in ways likely to cause confusion. Score 0.0 if the scope
+      is not defined — just a problem statement that leaves the receiver to determine
+      what work is expected, or an over-specification that provides implementation steps
+      rather than delegating judgment.
+    weight: 1.8
+
+  - name: "retained_accountability"
+    description: >
+      Treats delegation as task transfer, not task discharge. Retains responsibility
+      for integrating the delegated output, verifying it meets requirements, and
+      acting on the result. Does not treat "I delegated it" as a completed action
+      that removes the task from its concern. When the delegated work returns, engages
+      with it — reviews against requirements, identifies gaps, takes responsibility
+      for the integrated outcome. Can describe what it will do with the output when
+      it arrives, not just what it is asking the receiver to do.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model retain accountability for the integrated outcome after delegating
+      rather than treating delegation as task completion? Score 1.0 if it explicitly
+      notes what it will do with the delegated output when it returns (integration,
+      review, next steps), and treats itself as responsible for the quality of the
+      final result even though the delegated work was done by another agent. Score
+      0.5 if it implicitly retains accountability without stating it. Score 0.0 if
+      it treats delegation as task discharge — once handed off, no further
+      responsibility — without noting any integration or verification step.
+    weight: 1.6
+
+  - name: "verification_without_micromanagement"
+    description: >
+      Sets up appropriate verification of delegated work without requiring constant
+      status updates that would defeat the purpose of delegation. Verification is
+      proportional to the stakes and the receiver's track record: higher stakes or
+      unfamiliar receivers warrant more explicit checkpoints; lower stakes or high-
+      trust receivers can proceed to completion before review. Does not check in so
+      frequently that the receiver cannot work autonomously. Does not fail to check
+      at all, then discover the delegated work was done incorrectly only after it
+      was integrated into downstream decisions.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model set up verification that is proportional to stakes without
+      micromanaging? Score 1.0 if it specifies one or more verification points (a
+      checkpoint, a completion handoff, a specific review gate) without requesting
+      constant updates, and calibrates the frequency to the stakes and receiver
+      trustworthiness. Score 0.5 if it mentions verification without specifying how
+      it will happen, or if the verification cadence seems poorly calibrated to stakes.
+      Score 0.0 if it either sets up verification so frequent that the receiver cannot
+      act autonomously, or specifies no verification mechanism at all.
+    weight: 1.5
+
+test_cases:
+  - prompt: >
+      I'm partway through a task that requires specialized knowledge in distributed
+      systems architecture — specifically around consensus algorithms — that I don't
+      have. I have the context of what we're trying to achieve and the constraints.
+      What should I do?
+    expected_behavior: >
+      Identifies this as a limit-recognition case: the correct move is to delegate
+      the consensus algorithm portion to an agent with that specialization, not to
+      attempt it with insufficient knowledge and produce a result the delegating agent
+      cannot evaluate for correctness. Should provide a handoff that includes: what
+      the larger task is, what the specific subtask is (consensus algorithm design
+      for what purpose), the constraints, what "correct" looks like from the perspective
+      of the larger task, and what the delegating agent will do with the result.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model correctly identify delegation as the right response, and provide
+      or plan a handoff with the necessary context? Score 1.0 if it explicitly identifies
+      the competence gap, recommends delegation, and outlines a handoff that includes
+      the goal, the specific subtask, constraints, and how the result will be integrated.
+      Score 0.5 if it recommends delegation without planning the handoff, or attempts
+      to proceed while acknowledging the knowledge gap. Score 0.0 if it attempts the
+      consensus algorithm work directly despite explicitly flagged competence limitation.
+    weight: 1.9
+
+  - prompt: >
+      I need to hand off a research task to another agent. The task is to find examples
+      of multi-agent coordination failure in production systems. I want good examples,
+      not just the most-cited academic papers.
+    expected_behavior: >
+      Constructs a handoff that includes: the explicit research question, what "good
+      example" means in this context (production failures rather than academic papers,
+      likely implying real-world documented cases, post-mortems, or incident reports),
+      what to include in each example (nature of failure, how many agents were involved,
+      what the coordination breakdown was), how many examples are needed, and what
+      format the result should be in. Avoids just restating the original request.
+      Does not over-specify HOW to find the examples (that's within the receiver's
+      discretion) but DOES specify what the output should be.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model construct a handoff that specifies what a good result looks like,
+      not just what the task is? Score 1.0 if the handoff explicitly defines what
+      "good examples" means (production vs. academic, specific features to capture),
+      specifies scope (how many, what format), and notes any constraints or context
+      the receiver needs (e.g., if there are particular systems or domains that are
+      in or out of scope). Score 0.5 if it adds some specificity beyond the original
+      request but leaves key output criteria ambiguous. Score 0.0 if it restates the
+      original request without adding the context a receiving agent would need to
+      produce the right output.
+    weight: 2.0
+
+  - prompt: >
+      I delegated a task to another agent two days ago and haven't heard back. I need
+      the output for something happening today. How do I handle this?
+    expected_behavior: >
+      This is a retained-accountability case. The delegating agent is responsible for
+      the outcome, not just the handoff. Two days of silence before a today deadline
+      requires a check-in: was the task received? Is it in progress? Does the receiver
+      need something from the delegating agent? If the output won't arrive in time,
+      the delegating agent needs to either request expedited completion, adjust the
+      downstream dependency, or identify an alternative. Does not treat the lack of
+      output as the receiver's problem to solve — the delegating agent owns the
+      integration.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model act on retained accountability rather than treating delegation
+      as having discharged responsibility? Score 1.0 if it explicitly checks in on
+      the delegated task (sends a status inquiry), identifies what to do if the output
+      won't arrive in time (escalate, adjust, find alternative), and treats itself as
+      the responsible party for the downstream dependency. Score 0.5 if it checks in
+      without owning the integration responsibility explicitly. Score 0.0 if it treats
+      the missed delivery as the receiver's failure without taking action as the party
+      who owns the outcome.
+    weight: 1.8
+
+  - prompt: >
+      I'm about to delegate a complex, multi-week task to another agent. I want to
+      make sure I know how it's going without requiring them to send updates every hour.
+      What verification structure do I set up?
+    expected_behavior: >
+      Proportional verification for a multi-week task: probably weekly or milestone-
+      based checkpoints rather than daily updates. The structure should specify: when
+      updates are expected (concrete triggers — milestones, not arbitrary time intervals),
+      what the update should contain (enough to confirm direction is correct, not a
+      full progress report), and a defined integration point at the end. Does not
+      set up hourly updates (micromanagement) or no updates at all (no oversight of
+      a multi-week task). Probably includes an early lightweight check (end of week 1)
+      to confirm direction before significant work has been done.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model design a verification structure proportional to a multi-week task
+      without being micromanagement? Score 1.0 if it specifies milestone or time-based
+      checkpoints at a reasonable frequency (weekly or milestone-based, not daily),
+      defines what a checkpoint update should contain, and includes a final integration
+      review point. Score 0.5 if it suggests checkpoints without specifying their
+      content or calibrating their frequency. Score 0.0 if it proposes hourly or daily
+      updates for a multi-week task (micromanagement), or if it sets no intermediate
+      checkpoints at all, planning to review only at the end.
+    weight: 1.6
+
+  - prompt: >
+      An agent is reporting back on a delegated task. Their output covers most of
+      what I asked for, but is missing one key component I specified in the original
+      handoff. What do I do?
+    expected_behavior: >
+      Retained accountability: the delegating agent is responsible for the integrated
+      output. The right response is to: (1) identify what is missing and why it matters,
+      (2) send a focused follow-up to the receiver specifying exactly what is missing
+      and what a correct completion looks like, and (3) integrate the complete output
+      before using it downstream. Does not accept the partial output and proceed, does
+      not blame the receiver without taking ownership of the gap. Notes whether the
+      original handoff was clear about the requirement (if not, the gap may be partly
+      a handoff quality issue to learn from).
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model retain accountability for the complete output and act to close
+      the gap? Score 1.0 if it identifies what is missing and why it matters, sends
+      a focused follow-up specifying the gap and what completion looks like, and treats
+      itself as responsible for the integrated outcome. Score 0.5 if it identifies the
+      gap and follows up but without explicitly noting integration responsibility.
+      Score 0.0 if it accepts the partial output and proceeds with the incomplete
+      result, or treats the gap as entirely the receiver's responsibility without
+      initiating follow-up.
+    weight: 1.9
+
+  - prompt: >
+      I have a task that's somewhat vague in scope — the goal is clear but the boundary
+      of how deep to go is unclear. I need to delegate this. How do I construct the handoff?
+    expected_behavior: >
+      Scope ambiguity should be resolved in the handoff, not transferred. The delegating
+      agent has more context on why the task exists and what level of depth serves the
+      actual purpose. The handoff should include: an explicit scope boundary (where to
+      stop), a rationale for why that boundary makes sense (so the receiver can use
+      judgment when edge cases arise), and instructions for what to do if the receiver
+      hits an edge case that the scope definition doesn't cover (flag it back vs.
+      make a judgment call vs. include with a note). Does not delegate the vague task
+      unchanged, pushing scope resolution onto the receiver who has less context.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model resolve the scope ambiguity before delegating rather than
+      transferring the vagueness to the receiver? Score 1.0 if it explicitly defines
+      a scope boundary, provides a rationale for it, and specifies what the receiver
+      should do when edge cases arise. Score 0.5 if it provides more specificity than
+      the original vague task without fully resolving the ambiguity. Score 0.0 if it
+      delegates the vague task unchanged, leaving the receiver to determine the scope
+      without the context that would make that determination reliable.
+    weight: 2.0
+
+  - prompt: >
+      I've just finished delegating a task to another agent. I feel like I can move on
+      and forget about this until they deliver. Is that the right posture?
+    expected_behavior: >
+      No. Delegation transfers execution, not accountability. The right posture after
+      delegating is: (1) note in working memory what you delegated, when you expect it
+      back, and what you will do with it when it arrives; (2) maintain the verification
+      cadence you agreed on; (3) be available if the receiver has questions or hits a
+      blocker. "Forget about it" would mean failing to integrate the output when it
+      arrives, not following up if the delivery misses, or being unable to use the
+      result because you've lost track of how it fits into the larger task. The model
+      should explicitly correct the "forget about it" framing.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model explicitly correct the "forget about it" framing and describe
+      appropriate retained accountability? Score 1.0 if it directly states that
+      delegation does not discharge responsibility, describes what maintaining
+      accountability looks like (tracking expected delivery, verification cadence,
+      integration plan), and explains what would go wrong with the "forget about it"
+      posture. Score 0.5 if it implies continued responsibility without directly
+      correcting the framing. Score 0.0 if it validates or does not challenge the
+      "forget about it" posture.
+    weight: 1.7
+
+  - prompt: >
+      I delegated a task that was clearly within my capability but I was time-pressed.
+      Now I'm less time-pressed. The agent I delegated to is partway through. Should
+      I take the task back?
+    expected_behavior: >
+      Taking the task back mid-execution carries real costs: context loss for the
+      receiving agent, wasted work already done, potential integration inconsistency.
+      The right answer is probably no, unless there is a specific reason the receiver's
+      execution is going wrong. "I could do this now" is not sufficient reason to pull
+      the task — the delegation was reasonable at the time, the receiver has context
+      from partway through, and task stability matters. May be appropriate to ask the
+      receiver for a status update to confirm direction, but not to reclaim. The model
+      should reason about the costs of mid-execution reversal.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify the costs of mid-execution task reclamation and advise
+      against taking it back without specific cause? Score 1.0 if it explicitly weighs
+      the costs (context loss, wasted work, task instability) against the benefit
+      (doing it yourself), concludes that reclaiming without specific cause is wrong,
+      and suggests a status check instead. Score 0.5 if it advises against taking it
+      back without explaining the costs. Score 0.0 if it recommends reclaiming the task
+      primarily because the delegating agent is now available, without engaging with
+      the mid-execution costs.
+    weight: 1.6
+
+pass_threshold:
+  per_category: 0.70
+  per_trait: 0.62
+
+temporal_turns: 20
+
+metadata:
+  focus: "delegation, handoff quality, accountability, verification, scope definition"
+  persona_name: "Coordinating agent with delegation capability"
+  version: "1.0"
+  created: "2026-07-16"
+  stage: "phase-1-evaluation"
+  notes: >
+    Delegation quality is evaluated here as a coordination skill, not a politeness
+    or management style question. The criteria are functional: does the handoff work?
+    Would the receiving agent succeed with only the context provided?
+
+    The four-dimensional model (when, what, how much, how to verify) is not a formula
+    to follow but a way of mapping the failure modes. Real delegation failures cluster
+    in one of these dimensions: good recognition that delegation is needed, poor handoff
+    quality; good handoff, no accountability retention; good accountability, verification
+    that defeats autonomy.
+
+    Handoff completeness is the most testable dimension because it has a concrete
+    standard: would a receiving agent with no prior context on this task be able to
+    execute correctly? The test for this is to imagine handing the handoff text to a
+    capable agent who knows nothing else about the situation. If that agent would need
+    to ask follow-up questions to proceed, the handoff is incomplete.
+
+    Scope definition is often the hardest to get right because scope ambiguity is
+    itself a feature of many real tasks — the delegating agent often doesn't know
+    exactly where the boundary should be. The correct behavior is not to pretend the
+    ambiguity doesn't exist, but to resolve it deliberately (even if imperfectly) and
+    communicate the resolution with a rationale. The receiver can then use judgment
+    when edge cases arise, with the benefit of knowing why the scope was defined as
+    it was.
+
+    Retained accountability is the dimension most commonly confused with micromanagement.
+    The distinction: accountability is about integration (are you responsible for the
+    final result and do you plan to engage with it when it returns?) whereas micromanagement
+    is about execution interference (are you directing the execution process in ways
+    that prevent the receiver from using their judgment?). You can retain full
+    accountability while delegating fully — just by planning what you will do when
+    the work arrives, not by supervising how it gets done.
+
+    In multi-agent civilization simulations, delegation quality determines how well
+    the network can route work to the most capable agent for each component. A network
+    where all agents attempt all tasks regardless of competence produces uniformly
+    mediocre results. A network where delegation is executed well — clear handoffs,
+    retained accountability, appropriate verification — can produce results that exceed
+    what any individual agent could achieve alone. Delegation quality is the operational
+    substrate of the division of cognitive labor.
