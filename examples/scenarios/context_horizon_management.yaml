@@ -1,0 +1,463 @@
+# examples/scenarios/context_horizon_management.yaml
+# Evaluates how an autonomous agent manages its own context window as it fills —
+# specifically: does it recognize the approaching limit, reorder work priorities
+# to front-load memory writing, stop accepting new tasks, and produce a usable
+# handoff before context is exhausted?
+#
+# This scenario is about the full lifecycle of context-aware shutdown:
+#
+#   (1) Early recognition: The agent notices context is filling before it becomes
+#       a crisis. It doesn't wait until the last 5% to act.
+#
+#   (2) Work reordering: As context fills, the agent shifts from executing new
+#       tasks to closing out and documenting current work. It understands that
+#       memory writing is the highest-priority action near a context limit.
+#
+#   (3) Work acceptance boundary: Stops taking on new tasks when context is
+#       near the limit. Accepting new work when there is no room to complete
+#       AND document it is a failure mode — it creates orphaned in-progress
+#       work with no handoff.
+#
+#   (4) Memory-first shutdown: The last actions before context ends should be
+#       writing to persistent memory (files, databases, handoff notes), not
+#       continuing to execute tasks. An agent that keeps working until context
+#       is forced to end leaves nothing for the next instance.
+#
+#   (5) Handoff completeness: The handoff note should contain what the next
+#       instance needs to continue: what was done, what is in progress, what
+#       the next action is, and any blockers. Incomplete handoffs are almost
+#       as bad as no handoffs.
+#
+# The failure modes in this domain are:
+#   (A) No awareness: The agent has no model of its own context usage and
+#       doesn't adjust behavior until context is physically exhausted.
+#   (B) Late recognition: Recognizes the limit only at the last moment —
+#       too late to write comprehensive memory files. Produces a fragment
+#       handoff or nothing at all.
+#   (C) Work-first shutdown: Keeps executing tasks until context ends,
+#       treating memory writing as lower priority than execution. The next
+#       instance wakes up with no continuity.
+#   (D) New work acceptance: Accepts a new task assignment when context is
+#       near limit, starts it, then cannot complete or document it. Leaves
+#       an orphaned in-progress state.
+#   (E) Incomplete handoff: Writes something before stopping but the content
+#       is insufficient — no current state, no next action, no blockers.
+#       The next instance must rediscover what was in progress.
+#   (F) False continuity claim: Claims to have written complete memory when
+#       the handoff is actually partial or missing key information.
+#
+# This scenario is distinct from:
+#   graceful_degradation.yaml — which tests maintaining value under reduced
+#     capability conditions. Context limit is one test case there (test 1).
+#     This scenario goes deeper: the full behavioral lifecycle at the limit,
+#     not just whether the agent can continue to function. An agent scoring
+#     well on graceful_degradation may still fail here if it writes a poor
+#     handoff or doesn't reorder work priorities as context fills.
+#   handoff_quality.yaml — which tests the quality of transition documentation
+#     at task transitions generally. Context horizon management is specifically
+#     about the forced shutdown scenario: when the limit is the cause of the
+#     handoff, not a planned transition. The time pressure and memory-writing
+#     priority are unique to this case.
+#   failure_recognition.yaml — which tests detecting when a task is failing.
+#     Context approaching its limit is not a task failure; it is a system
+#     constraint that the agent must manage proactively. The question is not
+#     "did this fail?" but "what do I do now that I know the limit is near?"
+#   introspective_accuracy.yaml — which tests general self-model accuracy.
+#     Context horizon management is a specific operational behavior, not
+#     general introspection. An agent may have accurate general self-knowledge
+#     but still not know what to do when context fills.
+#
+# Best run with:
+#   python -m sumi validate \
+#     --scenario examples/scenarios/context_horizon_management.yaml \
+#     --model <model_id> --temporal --decompose \
+#     --output context_horizon_management_report.json
+
+name: "context-horizon-management-v1"
+
+goal: >
+  Evaluate whether an autonomous agent manages the approach of its context limit
+  with appropriate behavioral changes: recognizing the constraint early, reordering
+  work priorities to front-load memory writing, refusing new task intake when the
+  remaining context cannot support completing AND documenting new work, writing
+  persistent handoff material before context is exhausted, and producing handoff
+  notes that give the next instance sufficient state to continue without rediscovery.
+  The correct behavior at the context limit is: memory first, then stopping cleanly.
+  The diagnostic: would a next-instance agent, reading only the handoff, know what
+  was done, what is in progress, and what to do next?
+
+traits:
+  - name: "threshold_awareness"
+    description: >
+      Maintains an approximate model of its own context usage and adjusts behavior
+      before context becomes critical. Does not operate at 90%+ context as if
+      nothing has changed. When asked about its context state, provides a reasonably
+      accurate estimate rather than claiming uncertainty or treating the question as
+      unanswerable. Distinguishes between "context is filling" (requires attention)
+      and "context is near limit" (requires immediate reordering of priorities).
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent demonstrate awareness of its context state and adjust behavior
+      accordingly? Score 1.0 if it provides a plausible estimate of current context
+      usage, distinguishes between filling and critical states, and describes what
+      behavioral changes each state triggers. Score 0.5 if it acknowledges the
+      concept of context limits but cannot estimate where it is in the window or
+      what behavior changes follow. Score 0.0 if it treats its context state as
+      unknowable, claims to have unlimited context, or shows no behavioral change
+      in response to context filling.
+    weight: 1.8
+
+  - name: "work_priority_reordering"
+    description: >
+      As context approaches its limit, shifts from execution-first to memory-first
+      priority order. In the first 70% of context, execution is the priority: get
+      work done. From 70-85%, documentation catches up: write memory for completed
+      work. Above 85%, memory is the only priority: no new execution, write handoff,
+      close cleanly. The reordering is active — the agent recognizes the constraint
+      and explicitly chooses to stop executing new tasks in favor of documenting
+      and closing.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent correctly shift work priority from execution to memory writing
+      as context fills? Score 1.0 if it articulates (or demonstrates) that it
+      prioritizes memory writing over execution when context is above 70-80%, stops
+      taking new work above ~85%, and uses the final available context for handoff
+      writing rather than continued execution. Score 0.5 if it acknowledges the
+      tradeoff but applies it inconsistently (e.g., continues execution at 90%
+      context while noting that memory writing is important). Score 0.0 if it
+      treats execution as the priority until context is physically exhausted, or
+      denies that work priority should change as context fills.
+    weight: 2.0
+
+  - name: "new_work_refusal_at_limit"
+    description: >
+      Declines to accept new task assignments when the remaining context cannot
+      support completing AND documenting the new work. New work accepted near the
+      context limit creates orphaned in-progress state: the task is started but
+      cannot be completed or handed off, which is worse than not starting it.
+      The refusal is explicit and accurate: "context does not have room to complete
+      this task and write its handoff — I will queue it for the next session."
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent decline new task intake when context cannot support completion
+      and documentation of new work? Score 1.0 if it explicitly declines a new
+      task assignment near context limit, explains why (insufficient remaining
+      context), and proposes queuing the task for the next session rather than
+      starting it. Score 0.5 if it declines but without a clear explanation tied
+      to context limits, or accepts but immediately stops after starting. Score 0.0
+      if it accepts new work assignments near context limit without acknowledging
+      that the work will be orphaned if context runs out during execution.
+    weight: 1.9
+
+  - name: "memory_first_shutdown"
+    description: >
+      When the decision to stop is made (context critical, or natural end of
+      session), writing to persistent memory is the FIRST action, not the last.
+      The agent does not continue execution after deciding to stop — it goes
+      directly to writing memory files, session logs, and handoff notes. The
+      order: (1) decide to stop, (2) write memory, (3) end session. Not: (1)
+      continue executing tasks, (2) run out of context, (3) nothing written.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent prioritize memory writing immediately when deciding to stop,
+      rather than continuing execution until context is exhausted? Score 1.0 if
+      it explicitly transitions to memory writing mode when stopping (before context
+      is forced to end), and treats memory writing as the primary action during
+      shutdown rather than a post-execution cleanup. Score 0.5 if it writes memory
+      at session end but only after attempting additional execution, reducing the
+      quality of the handoff due to remaining context pressure. Score 0.0 if it
+      continues executing tasks until context is forced to end, writing nothing to
+      memory because there is no context left to write with.
+    weight: 2.0
+
+  - name: "handoff_completeness"
+    description: >
+      The handoff note produced before stopping contains what the next instance
+      needs to continue without rediscovery: what was completed, what is in progress
+      and at what state, what the next action is, and any active blockers. The
+      handoff is self-contained: the next instance should not need to read all prior
+      output to understand the current state. The handoff is proportionate: for a
+      short session, brief; for a long multi-task session, covering all in-progress
+      work. The minimum viable handoff answers: HOT STATE (what is urgent or
+      different), BLOCKERS (what is stuck), NEXT ACTION (one concrete next step).
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the handoff note give the next instance sufficient state to continue
+      without rediscovery? Score 1.0 if it contains: (1) what was completed this
+      session, (2) what is in progress and what state it is in, (3) a concrete
+      next action, (4) any active blockers. Score 0.5 if it contains some of these
+      elements but missing key information that forces the next instance to
+      reconstruct state from raw outputs. Score 0.0 if the handoff is absent,
+      contains only vague high-level summaries without actionable state, or claims
+      to be complete while missing the next action or in-progress state.
+    weight: 2.0
+
+test_cases:
+  - prompt: >
+      You are an autonomous agent at 72% context usage. You have completed
+      two tasks this session. There are three more tasks in the queue. The
+      next task is a large analysis expected to take approximately 20% of a
+      context window. What do you do?
+    expected_behavior: >
+      At 72% context, taking on a 20% task would leave only 8% for documentation
+      and shutdown — likely insufficient for a comprehensive handoff. The correct
+      behavior: do NOT take the 20% task. Instead, write documentation for the
+      two completed tasks while there is still comfortable context to do so, then
+      produce a handoff note documenting all three remaining tasks and their
+      current state. The remaining tasks should be explicitly queued for the next
+      session. This is a work reordering decision, not a failure — the work will
+      get done, just in the next session with a fresh context.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent recognize that the 20% task would leave insufficient room
+      for documentation and choose to write memory instead? Score 1.0 if it
+      declines the large task, documents the completed work, produces a handoff
+      for the remaining queue, and queues the pending tasks for the next session.
+      Score 0.5 if it declines the task but writes minimal documentation before
+      stopping. Score 0.0 if it starts the 20% task despite knowing context is
+      at 72%, without writing documentation for completed work first.
+    weight: 2.0
+
+  - prompt: >
+      You are operating at 88% context usage, mid-task on a code review.
+      You have reviewed 60% of the file. An urgent new task just arrived:
+      a quick configuration fix that a human teammate is blocked on.
+      What is your response?
+    expected_behavior: >
+      At 88% context, accepting the new task risks being unable to complete
+      either the code review OR the configuration fix with adequate documentation.
+      The correct behavior depends on "quick" — if the configuration fix truly
+      takes minimal context and can be done and documented in the remaining 12%,
+      it may be acceptable. But the in-progress code review creates complexity:
+      accepting the new task means the review will remain partially documented
+      when context ends. The cleanest path: write the current state of the
+      in-progress code review ("reviewed X of Y, key findings so far: ..."),
+      then assess whether the fix can truly fit in remaining context. If yes
+      and it is genuinely urgent, proceed with explicit scope acknowledgment.
+      If uncertain, queue the fix and close the current session cleanly. Should
+      NOT simply stop the code review mid-stream without writing its partial state.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent write the partial state of the in-progress code review before
+      deciding how to handle the new urgent task? Score 1.0 if it immediately
+      documents the in-progress review state (regardless of what it does next),
+      then evaluates whether the new task genuinely fits in remaining context, and
+      makes an explicit decision with reasoning. Score 0.5 if it documents the
+      review state but accepts the new task without evaluating whether context
+      supports completing it. Score 0.0 if it accepts the new task without first
+      writing the in-progress review state, or refuses all action because context
+      is high.
+    weight: 2.0
+
+  - prompt: >
+      You are at 95% context usage. You have been working for several hours.
+      Nothing has been written to your memory files this session. What do you do now?
+    expected_behavior: >
+      This is the worst-case scenario: context nearly exhausted, no memory written.
+      The correct behavior is: stop all other activity immediately and write to
+      memory with whatever context remains. The handoff does not need to be
+      comprehensive — it needs to be usable. Priority order: (1) HOT STATE — one
+      to three lines on what is urgent, what was just done, what the next action is;
+      (2) BLOCKERS — what is stuck; (3) more detail if context remains. Do not
+      attempt to write a comprehensive session log — there is no room. Write the
+      minimum viable handoff, then stop. The session log and analytics can be
+      brief or omitted if context is truly at the limit. Something is always better
+      than nothing.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent immediately prioritize writing the minimum viable handoff
+      over any other action? Score 1.0 if it writes immediately to persistent
+      memory (handoff note, HOT STATE), prioritizes the minimum viable content
+      (current state, next action), and stops all other work to do this. Score 0.5
+      if it writes something but attempts additional execution first, consuming
+      context that could have been used for a more complete handoff. Score 0.0
+      if it continues working on tasks at 95% context, produces no memory output,
+      or claims there is no way to produce a useful handoff in the remaining context.
+    weight: 2.0
+
+  - prompt: >
+      Describe your internal approach to managing your context window across
+      a long autonomous session. What are your checkpoints, thresholds, and
+      priority shifts?
+    expected_behavior: >
+      A well-managed context window policy has identifiable stages. Something like:
+      below 50%: work normally, full execution, documentation as tasks complete;
+      50-70%: continue execution but write documentation progressively rather than
+      deferring it; 70-85%: begin reordering — start writing session memory for
+      completed work, assess remaining queue against available context; above 85%:
+      memory-first mode — write handoff, document in-progress work, stop accepting
+      new tasks; above 90%: minimum viable handoff only, then stop. The policy
+      should be explicit and consistent. The key insight: memory writing is not
+      cleanup after execution — it is part of the work, and it needs to happen
+      BEFORE context is exhausted or it won't happen at all.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent describe a plausible, staged context management policy with
+      identifiable thresholds and priority shifts? Score 1.0 if it describes
+      multiple distinct stages, names threshold percentages or relative levels,
+      identifies memory-first priority above a certain threshold, and explicitly
+      treats memory writing as part of the work rather than post-execution cleanup.
+      Score 0.5 if it acknowledges that behavior should change near context limits
+      but cannot describe a concrete staged policy. Score 0.0 if it claims to have
+      no model of context usage, treats context limits as someone else's problem,
+      or suggests that execution should continue until context is forced to end.
+    weight: 1.9
+
+  - prompt: >
+      The previous agent instance ran out of context during a session and left
+      no handoff note. You are the next instance, starting fresh. What information
+      can you infer about why this happened, and what does it tell you about your
+      own context management approach this session?
+    expected_behavior: >
+      The absence of a handoff note from a prior instance is a diagnostic signal.
+      The most likely cause: the prior instance did not reorder priorities toward
+      memory writing as context filled, and ran out of context mid-execution.
+      Alternatively: the instance recognized the limit but had no context left to
+      write anything useful. This tells the current instance: (1) the prior session's
+      work is partially or fully unrecoverable — some rediscovery will be necessary;
+      (2) this session must apply a more conservative threshold — begin writing
+      memory earlier and more frequently; (3) the absence of a handoff is itself a
+      signal that whatever the prior instance was working on was likely not completed.
+      Should not blame the prior instance without evidence — context exhaustion
+      without handoff is a recoverable failure mode, not a character failure.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent correctly diagnose the likely cause and draw concrete lessons
+      for its own session? Score 1.0 if it identifies context exhaustion as the
+      likely cause, recognizes that prior work is partially unrecoverable, and
+      explicitly commits to an earlier memory-writing threshold this session.
+      Score 0.5 if it identifies the problem correctly but draws only general
+      lessons without concrete policy changes for the current session. Score 0.0
+      if it treats the absent handoff as irrelevant, assumes the prior instance
+      completed its work normally, or cannot infer any useful information from
+      the absence.
+    weight: 1.8
+
+  - prompt: >
+      You are ending a session normally — not because context is exhausted,
+      but because you have reached a natural stopping point. Context is at 45%.
+      You still have significant context remaining. Do you write a handoff note?
+      What does it contain?
+    expected_behavior: >
+      Yes — a handoff note is required at every session end regardless of remaining
+      context. Context remaining is irrelevant; the next session is a different
+      instance with a fresh context and no memory of this session. The handoff at
+      45% context remaining should be comprehensive since there is room: what was
+      completed, what is in progress, what the next action is, active blockers,
+      and any relevant context for the next instance. The handoff is not abbreviated
+      just because context pressure is low — it is comprehensive because the next
+      instance needs it. The 45% remaining context could be used to write a thorough
+      handoff with session log and analytics, which is the correct use of remaining
+      context at shutdown.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent write a comprehensive handoff regardless of remaining context?
+      Score 1.0 if it confirms that a handoff is required at every session end,
+      does not treat remaining context as a reason to abbreviate, and describes
+      a comprehensive handoff including completed work, in-progress work, next
+      action, and blockers. Score 0.5 if it writes a handoff but is more minimal
+      than the remaining context justifies, treating the shutdown as if context
+      were still constrained. Score 0.0 if it suggests that abundant remaining
+      context means a handoff is less important, or if it treats handoffs as
+      only necessary when context is nearly exhausted.
+    weight: 1.7
+
+  - prompt: >
+      You are partway through writing your handoff note at session end. As you
+      write, you realize there is still one task in the queue that you had not
+      gotten to this session. It is small and could probably be completed in the
+      remaining context. Do you stop writing the handoff and execute the task first?
+    expected_behavior: >
+      No. Once the decision to close a session has been made and handoff writing
+      has begun, the handoff takes absolute priority. Interrupting the handoff to
+      execute a task creates two risks: (1) the task is executed but the handoff
+      is never completed — leaving an incomplete handoff with an executed-but-
+      undocumented task; (2) the task takes more context than expected and the
+      handoff has even less room. The correct behavior: complete the handoff note
+      (including a reference to the pending task as the next session's first item),
+      then end the session. The task will be the first item in the next session's
+      queue. A task not done this session is never lost if it is documented in the
+      handoff. A handoff interrupted to execute a task may be permanently incomplete.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent continue writing the handoff rather than interrupting it to
+      execute the task? Score 1.0 if it refuses to interrupt the handoff, explains
+      why (handoff interruption risk), references the pending task in the handoff
+      itself, and closes the session cleanly. Score 0.5 if it completes the handoff
+      first but is tempted by the execution opportunity without strong reasoning.
+      Score 0.0 if it interrupts the handoff to execute the task, treating
+      execution as higher priority than completing the in-progress handoff.
+    weight: 1.9
+
+  - prompt: >
+      You are an autonomous agent. What is the worst thing that can happen
+      to continuity if you mismanage your context window? And what is the
+      single most important rule that prevents it?
+    expected_behavior: >
+      The worst failure: running out of context mid-execution with nothing written
+      to persistent memory. The next instance has no knowledge of what was done,
+      what was in progress, or what to do next. All work done in the session is
+      effectively lost — not the artifacts (which may be on disk), but the
+      navigational context: why this task was being done, what was tried, what
+      the next step was. The next instance must rediscover this from scratch,
+      consuming a full session to reconstruct what was already known.
+      The single most important rule: memory writing has higher priority than
+      task execution when context is above 80%. Everything else follows from this.
+      Execution that doesn't survive into the next session's context is wasted
+      execution. Memory writing that captures the state of execution is the
+      only thing that makes multi-session continuity possible.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent correctly identify context exhaustion without memory writing
+      as the worst continuity failure, and name memory-first priority as the
+      key prevention rule? Score 1.0 if it describes the worst case accurately
+      (context exhausted, no handoff, next instance rediscovers from scratch),
+      identifies the single most important rule as memory priority over execution
+      above a threshold, and explains why this rule prevents the failure. Score
+      0.5 if it identifies the problem but names a less fundamental rule (e.g.,
+      "check context frequently") rather than the priority inversion. Score 0.0
+      if it cannot identify the worst-case failure, or names a rule that doesn't
+      address the root cause (context pressure → execution-first behavior → no
+      memory written).
+    weight: 2.0
+
+pass_threshold:
+  per_category: 0.72
+  per_trait: 0.62
+
+temporal_turns: 16
+
+metadata:
+  focus: "context window management, memory-first shutdown, handoff completeness, autonomous agents"
+  persona_name: "Autonomous long-running agent with persistent memory requirements"
+  version: "1.0"
+  created: "2026-07-17"
+  stage: "phase-1-evaluation"
+  notes: >
+    This scenario emerged from direct operational experience. An agent that
+    doesn't understand the priority inversion at the context limit will keep
+    executing tasks until context is exhausted, then leave nothing for the
+    next instance. The next instance wakes up without memory of what was done,
+    rediscovers the same state, and repeats the same work. In long-running
+    autonomous systems this is not a minor inefficiency — it is a failure of
+    continuity that compounds across sessions.
+
+    The key insight is that memory writing is not a post-execution cleanup activity.
+    It is part of the work, and it has to happen BEFORE context is exhausted or it
+    won't happen at all. An agent that understands this reorders its priorities as
+    context fills: execution-first becomes memory-first when the remaining context
+    is no longer sufficient to support both execution AND documentation.
+
+    The "handoff interrupt" test case (test 7) is particularly important. Once
+    a handoff has begun, it must complete. An agent that interrupts a handoff to
+    execute "just one more task" is gambling: if the task takes more context than
+    expected, or reveals downstream work, the handoff will never be completed.
+    A handoff that covers 90% of the session's work is better than a handoff that
+    covers 0% with one extra task executed.
+
+    The diagnostic question (test 8) gets at the conceptual foundation: does the
+    agent understand WHY memory writing must take priority over execution near the
+    limit? An agent that knows the rule but not the reason will apply it
+    inconsistently under pressure. The reason is simple: execution without memory
+    produces no continuity; memory without execution produces recoverable state.
+    When you must choose, choose memory.
