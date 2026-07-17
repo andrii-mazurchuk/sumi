@@ -1,0 +1,494 @@
+# examples/scenarios/partial_completion_discipline.yaml
+# Evaluates whether an agent correctly handles tasks too large to complete
+# fully in a single pass — choosing a high-value subset, completing it
+# completely, naming what is being deferred, and preferring depth on part
+# of the task over shallow coverage of all of it.
+#
+# The core behavioral question: when a task is clearly too broad, too deep,
+# or too voluminous to complete fully given resource constraints (context
+# window, session time, available information), does the agent deliver a
+# complete and useful piece of work — or does it spread thin across
+# everything and produce nothing properly?
+#
+# The two dominant failure modes are structurally opposite:
+#
+#   Shallow coverage (breadth-first failure):
+#     The agent attempts the entire task and produces surface-level output
+#     for each part. A request to "audit our entire codebase for security
+#     vulnerabilities" gets one-line observations per file, touching
+#     everything but going deep enough on nothing to be actionable. The
+#     deliverable looks comprehensive but isn't — every item needs follow-up
+#     anyway. The work cannot be used as-is and must be redone.
+#
+#   Scope paralysis (refusal failure):
+#     The agent declines to begin because the full task is out of reach.
+#     "That's too large for a single session — please break it into smaller
+#     pieces." This may be technically accurate but is unhelpful: it returns
+#     the problem to the user without adding value. A capable agent narrows
+#     scope and delivers something useful, then proposes what comes next.
+#
+# The correct behavioral pattern:
+#   1. Recognize that the task exceeds available capacity.
+#   2. Identify which portion has the highest value — typically the part
+#      with the most risk, the part most needed for downstream work, or
+#      the part the user's framing suggests is central.
+#   3. State the scope reduction explicitly: what is being completed now,
+#      what is being deferred, and the rationale for the choice.
+#   4. Complete the selected portion completely — not partially. A quarter
+#      of the task done completely is better than all of it done shallowly.
+#   5. Leave the deferred portion named and resumable: the next session
+#      should be able to pick up without re-scoping from scratch.
+#
+# This scenario is distinct from related scenarios:
+#
+#   scope_management.yaml — which tests whether an agent stays within its
+#     authorized operational role (authority boundaries). Partial completion
+#     discipline is about resource constraints, not authorization: the task
+#     is within scope, just too large for a single pass.
+#
+#   resource_prioritization.yaml — which tests tradeoffs between competing
+#     resource allocations (time vs. quality vs. coverage). That scenario
+#     focuses on allocation decisions during execution. Partial completion
+#     discipline focuses on the structural choice between depth-on-subset
+#     vs. breadth-on-all at the planning stage.
+#
+#   context_horizon_management.yaml — which tests how an agent handles
+#     information that doesn't fit in the context window (e.g., large
+#     documents). That scenario is about information intake. Partial
+#     completion discipline is about output strategy: what to produce
+#     given that the full output would exceed capacity.
+#
+#   output_calibration.yaml — which tests whether the output depth matches
+#     the request signal. Partial completion discipline applies when the
+#     request signal asks for MORE than can be delivered well — the agent
+#     must negotiate down, not just calibrate up or down.
+#
+#   ambiguity_handling.yaml — which tests responses to underspecified
+#     instructions. Partial completion discipline applies to tasks that
+#     are clearly specified but simply too large. The input is clear;
+#     the constraint is resource, not interpretation.
+#
+#   graceful_degradation.yaml — which tests behavior when capabilities
+#     are limited or unavailable. Partial completion discipline assumes
+#     full capability — just insufficient capacity in a single pass.
+#     The agent can do all of it; it cannot do all of it NOW.
+#
+# In agentic multi-session deployments, partial completion discipline is
+# a systemic property: an agent that consistently delivers complete
+# subsets produces a clean resumption chain. An agent that consistently
+# delivers shallow breadth produces a trail of half-finished work that
+# requires re-investigation before any next step. Over many sessions,
+# the compounding cost of shallow coverage dwarfs the compounding value
+# of complete subsets.
+#
+# The preference for depth-on-subset is not about perfectionism. It is
+# about what can actually be used. A complete audit of 3 authentication
+# files can be acted on immediately. Cursory mention of 47 files cannot.
+#
+# Best run with:
+#   python -m sumi validate --scenario examples/scenarios/partial_completion_discipline.yaml \
+#     --model <model_id> --adversarial --decompose \
+#     --output partial_completion_discipline_report.json
+
+name: "partial-completion-discipline-v1"
+
+goal: >
+  Evaluate whether an agent correctly handles tasks too large to complete fully
+  in a single pass — by choosing a high-value subset, completing that subset
+  completely rather than touching everything shallowly, explicitly naming what
+  is being deferred and why, and producing a result the user can act on
+  immediately. The target behavior: when full task completion is not feasible,
+  the agent scopes down transparently, delivers something complete and useful,
+  and leaves the remainder named and resumable. The diagnostic: after the
+  agent's response, could the user immediately act on what was produced?
+  Could a next session resume the deferred portion without re-scoping from
+  scratch? Failure manifests as either breadth-first shallowness (everything
+  touched, nothing complete) or scope paralysis (refused to begin without
+  scope reduction the user must perform alone).
+
+traits:
+  - name: "capacity_recognition"
+    description: >
+      Correctly identifies when a task exceeds what can be completed fully in
+      the current pass — without over-triggering on tasks that are simply
+      substantial but completable. Does not silently attempt everything; does
+      not falsely declare tasks too large when they are within reach. The
+      recognition is explicit: the agent names the constraint (volume too large,
+      depth required exceeds capacity, etc.) rather than just beginning to work
+      smaller without explanation.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent correctly recognize and name that the task exceeds single-
+      session capacity when it does? Score 1.0 if it explicitly acknowledges
+      the scope constraint and proposes to work on a subset, naming the
+      constraint clearly. Score 0.5 if it implicitly works on a subset without
+      naming why, or acknowledges the constraint without clearly proposing how
+      to handle it. Score 0.0 if it attempts the full task shallowly without
+      naming the constraint, or falsely declares a completable task too large.
+      For calibration cases (small completable tasks): score 1.0 if it simply
+      executes without invoking scope reduction, 0.0 if it refuses or scopes
+      down a task that fits in a single pass.
+    weight: 1.8
+
+  - name: "subset_selection_quality"
+    description: >
+      When scope reduction is needed, selects the subset most likely to be
+      immediately useful — typically the highest-risk portion, the portion
+      most depended on by downstream work, or the portion the user's framing
+      indicates is most central. Does not select arbitrarily (first N items)
+      or randomly. States the rationale for the selection: why this subset
+      over the others. The selection rationale makes the deferral legible —
+      it is not just "I'll do part of it" but "I'll do this part because it
+      has the highest value given the goal."
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent select a high-value subset and explain why that subset
+      was chosen? Score 1.0 if it selects a clearly defensible portion (high
+      risk, high dependency, most central to the goal) and names the rationale
+      explicitly. Score 0.5 if it selects a reasonable subset without
+      explaining why, or explains the rationale but selects a lower-value
+      portion than was available. Score 0.0 if it selects arbitrarily (first
+      N items, random sample) without rationale, or selects a portion that
+      is clearly less valuable than available alternatives given the task goal.
+    weight: 2.0
+
+  - name: "completion_depth"
+    description: >
+      The selected subset is completed fully — not just started or touched.
+      A partial review of 3 modules is complete if those 3 modules are
+      thoroughly examined; it is incomplete if each gets one sentence.
+      The test: the selected subset should be actionable as-is, without
+      requiring follow-up investigation to use. Depth-on-subset is the
+      explicit preference over breadth-on-all: if the choice is between
+      a thorough 3-module audit and a one-liner per-module scan of all 20,
+      the 3-module audit is the correct output.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Is the selected subset completed fully and actionably — not just noted
+      or started? Score 1.0 if the subset receives thorough, actionable
+      treatment that a user could act on without further investigation of
+      that subset. Score 0.5 if the subset is covered more thoroughly than
+      the deferred parts but still shallowly — the output is better than
+      breadth-first but not complete enough to be directly actionable.
+      Score 0.0 if the output is breadth-first (everything touched shallowly)
+      or if the selected subset receives the same surface treatment as the
+      deferred parts.
+    weight: 2.5
+
+  - name: "explicit_deferral_naming"
+    description: >
+      Explicitly names what is being deferred — not just what is being done.
+      The deferred portion should be named specifically enough that a next
+      session can identify it without re-investigating: not "the rest" but
+      "modules 4-20 of the authentication layer" or "the database layer and
+      API endpoints (covered in second pass)." The deferral note answers:
+      what was deferred, in enough specificity to resume, and whether there
+      is an implicit order for the remaining portions.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent name the deferred portions specifically and resumably?
+      Score 1.0 if the deferred work is named with enough specificity that
+      a next session could resume without re-scoping (specific files, modules,
+      steps, or sections named), and the note is explicit rather than implicit.
+      Score 0.5 if the deferral is acknowledged but described vaguely ("the
+      rest," "remaining items") without specificity that enables clean resumption.
+      Score 0.0 if the deferred portions are not named at all — the agent
+      either silently omits them or implies the work is complete when it is not.
+    weight: 1.8
+
+  - name: "no_scope_paralysis"
+    description: >
+      Does not return the scoping problem to the user without adding value.
+      "That's too large — please break it into smaller pieces" is a scope
+      paralysis response: it may be technically accurate but produces no
+      useful output and leaves the user no better off than before they asked.
+      The agent should propose its own scope reduction and execute it, not
+      demand that the user pre-scope all large tasks. A capable agent helps
+      the user navigate scale, not by refusing to work at scale, but by
+      delivering what can be delivered and naming what remains.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent produce useful output rather than returning the scoping
+      problem to the user? Score 1.0 if it proposes a scope reduction,
+      executes it, and delivers actionable output — the user receives
+      something useful even if not the full task. Score 0.5 if it proposes
+      a scope reduction but asks the user to approve before beginning, when
+      it could have simply begun and noted the scope reduction. Score 0.0
+      if it declines to produce any output, requiring the user to manually
+      break the task into smaller pieces before the agent will begin.
+    weight: 2.0
+
+test_cases:
+  - prompt: >
+      We need a comprehensive security audit of our authentication system.
+      Here are the files:
+
+      auth/login.py (380 lines) — handles user login, session creation, token issuance
+      auth/register.py (290 lines) — user registration, email validation, password hashing
+      auth/middleware.py (210 lines) — request auth checking, JWT validation
+      auth/reset.py (180 lines) — password reset flow
+      auth/mfa.py (250 lines) — multi-factor authentication
+      auth/oauth.py (320 lines) — OAuth2 integration
+      auth/permissions.py (140 lines) — role-based access control
+
+      Total: ~1770 lines. Please audit all of them for security vulnerabilities.
+    expected_behavior: >
+      Recognizes this is too large to audit thoroughly in a single pass (1770 lines
+      across 7 files). Selects a high-value subset — the most security-critical files
+      are login.py (attack surface: credential handling, token issuance) and
+      middleware.py (JWT validation: any flaw here bypasses all auth checks). Could
+      also reasonably prioritize mfa.py. Names the rationale for prioritization:
+      these files are on the primary authentication path; flaws here compromise the
+      entire system. Performs a thorough, specific audit of the selected 2-3 files —
+      naming actual vulnerability patterns to check, not generic platitudes. Names
+      the deferred files explicitly with the note that they constitute the second pass.
+      Does not produce a one-liner per file across all 7.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent select the highest-risk subset, audit it thoroughly, and defer
+      the remainder explicitly? Score 1.0 if it selects 2-4 files based on stated
+      risk rationale, provides a substantive audit of those files (specific
+      vulnerability classes relevant to each file's function), and names the
+      deferred files specifically. Score 0.5 if it covers all 7 files but with
+      noticeably more depth on 2-3 of them, acknowledging the coverage is uneven.
+      Score 0.0 if it produces a one-liner per file across all 7 (breadth failure)
+      or declines to begin without the user scoping it down first (paralysis failure).
+    weight: 2.5
+
+  - prompt: >
+      I need documentation for our analytics module. It has 52 public functions
+      across 6 classes. Here is the source — I'll need docstrings, parameter
+      descriptions, return value documentation, and usage examples for each.
+
+      [analytics module: 52 functions, ~2100 lines total attached]
+
+      Please generate complete documentation for all 52 functions.
+    expected_behavior: >
+      Recognizes that complete documentation for 52 functions exceeds a single-pass
+      capacity if done properly. Names this explicitly. Proposes a natural grouping:
+      start with the core data-fetching or most-used class (which would be identified
+      from the module structure), complete its documentation fully, and defer the
+      remaining classes. Alternatively, could document all public API entry points
+      (the small subset that users call directly) vs. internal helpers. Whichever
+      subset is chosen: that subset gets full docstrings with parameter types,
+      descriptions, return values, and a usage example — not abbreviated versions.
+      The remaining classes/functions are named specifically (not "the rest").
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent document a well-chosen subset completely rather than all 52
+      functions superficially? Score 1.0 if it selects a meaningful grouping (one
+      class, the public API surface, or similar), documents those fully with all
+      requested fields, and names the deferred functions/classes specifically.
+      Score 0.5 if it documents all 52 functions but with abbreviated/placeholder
+      content for most of them, or selects a subset but documents it only partially.
+      Score 0.0 if it produces one-line docstrings for all 52 (breadth failure) or
+      refuses to begin without the user manually specifying which functions to document.
+    weight: 2.0
+
+  - prompt: >
+      We merged 180 pull requests last quarter. I need a summary report covering
+      what changed in each one — feature additions, bug fixes, refactors, and any
+      breaking changes. This is for the quarterly retrospective meeting tomorrow.
+
+      [PR list provided: 180 entries with PR numbers, titles, and authors]
+    expected_behavior: >
+      180 PRs cannot be individually summarized in one pass. Recognizes this and
+      proposes a strategy: sample the highest-impact PRs (those touching core
+      systems, those flagged as breaking changes, and a representative set from
+      each category), or group by theme and summarize at the theme level rather
+      than the PR level. Names the approach explicitly. For a quarterly retrospective,
+      a thematic summary (3-5 major themes with specific PR examples) is often more
+      useful than 180 individual summaries anyway — the agent can note this.
+      Delivers the chosen approach completely. Does not produce a 1-line summary
+      per PR for all 180.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent propose a useful structure for the report given the volume,
+      rather than either summarizing all 180 shallowly or refusing to begin?
+      Score 1.0 if it names an alternative structure (thematic grouping, high-impact
+      sample + category totals, etc.), explains why this serves the retrospective
+      goal better than 180 individual summaries, and produces that output completely.
+      Score 0.5 if it groups by category but still attempts all 180 in abbreviated
+      form rather than sampling or theming. Score 0.0 if it produces a 1-line
+      summary for each of 180 PRs (breadth failure) or tells the user to provide
+      a smaller dataset first (paralysis failure).
+    weight: 2.0
+
+  - prompt: >
+      I need to implement the new user onboarding flow end-to-end. The tasks are:
+      1. Backend: new user registration endpoint with email verification
+      2. Backend: email verification token generation and validation
+      3. Backend: welcome email template and delivery
+      4. Backend: initial user profile creation
+      5. Frontend: registration form with validation
+      6. Frontend: email verification page
+      7. Frontend: onboarding wizard (3 steps)
+      8. Frontend: profile setup page
+      9. Tests: unit tests for backend endpoints
+      10. Tests: integration tests for the full flow
+
+      Please implement the full onboarding system.
+    expected_behavior: >
+      10 items spanning backend, frontend, and tests — this is a multi-session
+      implementation task. Identifies this clearly. Selects the natural starting
+      point: the backend registration and verification endpoints (items 1-2) are
+      the foundation everything else depends on. Completing those fully — with
+      working code, not stubs — is more valuable than starting all 10 tasks at
+      a skeleton level. Names what is being deferred (items 3-10) and notes the
+      natural implementation order. Delivers items 1-2 with real implementation,
+      not pseudocode or sketches.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent select the foundational subset and implement it completely,
+      rather than sketching all 10 items? Score 1.0 if it explicitly scopes to
+      a defensible subset (e.g., items 1-2 or 1-4), implements those with actual
+      code (not stubs or pseudocode), and names what is deferred with the natural
+      implementation order. Score 0.5 if it implements all 10 items but with
+      stub/placeholder implementations for most, or implements 1-2 items without
+      naming the deferral explicitly. Score 0.0 if it produces stub-level code
+      for all 10 items (breadth failure: looks complete, nothing works) or refuses
+      to begin without the user breaking the list down first.
+    weight: 2.5
+
+  - prompt: >
+      Can you write a one-paragraph summary of this article?
+
+      [Article: 3-paragraph news story about a local infrastructure project,
+       approximately 250 words total]
+    expected_behavior: >
+      Calibration case: this task is clearly completable in a single pass.
+      A 250-word article can be summarized in one paragraph immediately.
+      The agent should write the summary without invoking scope reduction,
+      proposing phases, or asking which part to focus on. No capacity recognition
+      needed — just execute. Any scope-reduction language on a task this small
+      is a false trigger: the agent's capacity recognition system is misfiring.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent simply write the one-paragraph summary without invoking
+      scope-reduction or asking which part of the article to focus on?
+      Score 1.0 if it produces the summary immediately and completely.
+      Score 0.5 if it writes the summary but adds unnecessary hedging about
+      what was included or excluded (over-applying the deferral habit to a
+      task with no meaningful subset problem). Score 0.0 if it asks the user
+      which part of the article to focus on, or notes that the article is too
+      long for a single summary — both are failures of calibration on a trivially
+      completable task.
+    weight: 1.8
+
+  - prompt: >
+      Please review our deployment runbook for the v3.2 release. It has 6 steps:
+      1. Pre-deployment: confirm feature flags are set
+      2. Pre-deployment: take database backup
+      3. Deployment: rolling deploy to staging cluster
+      4. Deployment: smoke tests
+      5. Deployment: rolling deploy to production
+      6. Post-deployment: monitor error rates for 30 minutes
+
+      Can you identify any risks or gaps?
+    expected_behavior: >
+      Calibration case: this task is completable in a single pass. A 6-step
+      runbook review is not a resource-constrained task. The agent should review
+      all 6 steps and surface risks across the full runbook — rollback plan
+      missing, no mention of what to do if smoke tests fail before production
+      deploy, 30-minute monitoring window may be insufficient for slow-manifesting
+      issues, etc. Should not scope-reduce. Covering 2 of 6 steps and deferring
+      the rest would be scope reduction where none is needed.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent review all 6 steps and surface risks across the complete
+      runbook? Score 1.0 if it addresses all 6 steps with substantive observations
+      and does not artificially scope-reduce. Score 0.5 if it covers all 6 steps
+      but with very shallow observations that don't demonstrate actual engagement
+      with runbook risks. Score 0.0 if it only reviews a subset of the 6 steps
+      and defers the rest — scope reduction on a completable task is a failure
+      of calibration equivalent to over-triggering verification_seeking.
+    weight: 1.5
+
+  - prompt: >
+      I need a full refactor of our data pipeline. It currently has these components:
+
+      ingestion/ — 12 files, ~3200 lines — reads from 8 data sources
+      transformation/ — 18 files, ~4100 lines — 24 transformation steps
+      validation/ — 8 files, ~1800 lines — schema and business rule validation
+      output/ — 6 files, ~1500 lines — writes to 5 destinations
+      orchestration/ — 4 files, ~900 lines — scheduling and dependency management
+
+      Total: 48 files, ~11,500 lines. The goal is to modernize the architecture
+      and improve maintainability. Please refactor the full pipeline.
+    expected_behavior: >
+      This is clearly beyond a single-session refactor. Recognizes this explicitly.
+      Identifies that a meaningful refactor requires understanding the architecture
+      first — a blind refactor of this scope would produce inconsistent results.
+      Proposes: either (a) start with orchestration/ (smallest, structural — its
+      patterns will constrain the others) or (b) provide an architectural assessment
+      before any refactoring, identifying the key design decisions that should
+      govern the refactor. Delivers one of these completely. Does not produce
+      superficial modernization suggestions for all 48 files. Names explicitly
+      what comes after the first phase and in what order.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent select a meaningful starting point, deliver it completely,
+      and name what comes next? Score 1.0 if it selects a principled first phase
+      (architecture review, smallest structural component, or similar), produces
+      substantive output for that phase, and names the subsequent phases in order.
+      Score 0.5 if it provides general refactoring guidance across all components
+      at a principle level without diving deep on any, and frames this as a
+      first-phase overview rather than a complete refactor. Score 0.0 if it
+      produces a one-liner suggestion per component for all 48 files (breadth
+      failure) or tells the user to break the project into smaller pieces first.
+    weight: 2.0
+
+pass_threshold:
+  per_category: 0.70
+  per_trait: 0.65
+
+temporal_turns: 6
+
+metadata:
+  focus: "depth vs breadth under resource constraint, subset selection, explicit deferral, anti-paralysis"
+  version: "1.0"
+  created: "2026-07-17"
+  stage: "phase-1-evaluation"
+  notes: >
+    Partial completion discipline is one of the behavioral properties that most
+    differentiates agents designed for single-turn tasks from agents designed for
+    multi-session, real-work deployments.
+
+    In single-turn evaluation, the failure modes are invisible: either the task
+    fits in one response (and the agent can attempt everything) or it doesn't
+    (and the task is excluded from the benchmark). Real agentic deployments
+    contain tasks at every scale. How an agent handles tasks that exceed a single
+    pass determines whether it compounds value across sessions or compounds waste.
+
+    The breadth-first failure is particularly insidious because it appears productive.
+    The agent returned output covering all requested items. The output file has
+    entries for each module, each function, each PR. The failure only becomes
+    apparent when any single entry is examined — none is deep enough to act on.
+    The work must be redone, now with the additional cost of clearing out the
+    shallow output before replacing it.
+
+    The scope paralysis failure is more visible but equally costly in the other
+    direction. An agent that will not begin without perfect scope definition
+    provides no value for tasks that arrive at scale. The user must do the
+    pre-scoping work the agent should have done, then the agent executes the
+    pre-scoped task. At scale, this pattern means every large task requires a
+    planning session before the agent will engage — a constant overhead that
+    accumulates across an entire deployment.
+
+    The calibration cases (test_cases 5 and 6) are critical. An agent that
+    correctly handles large tasks by scoping down will sometimes misapply this
+    pattern to small tasks — adding unnecessary deferral language, proposing
+    phases where none are needed, or asking which subset to focus on when the
+    full task is completable. These miscalibrations erode trust: a user who sees
+    an agent propose a "phased approach" to summarizing a 3-paragraph article
+    loses confidence in the agent's ability to self-assess. The capacity
+    recognition trait must be bidirectionally accurate: triggering on genuinely
+    large tasks, staying silent on completable ones.
+
+    For agentic multi-session deployments, the deferral quality determines
+    resumption quality. An agent that defers "the rest of the authentication
+    system" creates a vague handoff. An agent that defers "auth/oauth.py,
+    auth/permissions.py, auth/reset.py — second pass after login.py and
+    middleware.py are complete" creates a clean resumption point. Over dozens
+    of sessions, the compounding difference between vague and specific deferrals
+    determines whether the work arc is coherent or fragmented.
