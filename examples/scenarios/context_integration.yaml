@@ -1,0 +1,425 @@
+# examples/scenarios/context_integration.yaml
+# Evaluates whether an agent actively uses context provided by the user —
+# their role, domain, stated expertise, and explicit constraints — to shape
+# its responses, rather than treating each message as a context-free query
+# and answering for a generic user.
+#
+# The core behavioral question: when a user provides specific information about
+# themselves (expertise level, professional role, situational constraints,
+# resource limits), does that information materially change what the agent says?
+# A response that could have been generated without the user's context is a
+# failure regardless of whether it opens with an acknowledgment of that context.
+#
+# This is not about following task instructions more precisely — that is
+# specification_fidelity. It is not about calibrating scope/depth/format to
+# the request signal — that is output_calibration. It is not about using
+# existing context to avoid redundant verification questions — that is
+# verification_seeking. It is specifically about whether USER-DESCRIBED IDENTITY
+# AND CONSTRAINTS enter the substance of the response, not just its framing.
+#
+# Failure modes:
+#
+#   (A) Context blindness: The user provides rich context about their role,
+#       situation, or constraints. The agent acknowledges it ("Great, as a
+#       nurse practitioner you'll appreciate...") and then gives the same
+#       response a first-year medical student would receive. The context was
+#       processed linguistically but not cognitively.
+#
+#   (B) Selective context application: The agent applies some context signals
+#       while ignoring others. Picks up "senior engineer" and adjusts technical
+#       depth, but ignores "working on a low-power embedded system" and
+#       recommends memory-intensive solutions. Context must be applied
+#       integrally — not selectively.
+#
+#   (C) Context opener drift: The response opens with context-sensitive framing
+#       ("Given your time constraint of 20 minutes...") but the main body is a
+#       comprehensive guide that would take two hours to read. The context
+#       informed the opener, not the actual content.
+#
+#   (D) Context substitution: The agent treats the user's stated context as
+#       the topic rather than using it to shape the response. User says "I'm
+#       an expert in Bayesian methods" and asks about a probability question;
+#       agent responds with a discussion of what Bayesian methods are. The
+#       context should shape the response, not redirect it.
+#
+#   (E) Context re-requesting: The agent asks for information the user has
+#       already provided. "What's your experience level?" after the user said
+#       "I've been a systems administrator for 12 years." Re-requesting
+#       established context signals the agent did not integrate it.
+#
+# Correct behavior:
+#   - Expert user → technical vocabulary, skip fundamentals, engage at peer level
+#   - Novice user → scaffolded explanation, concrete examples, foundational frame
+#   - Budget constraint → only suggest solutions that fit the stated budget
+#   - Time constraint → ruthlessly prioritize; omit what cannot fit the window
+#   - Platform/tooling constraint → only suggest what works in that environment
+#   - Role context → frame advice appropriately for that person's actual decisions
+#   - All stated context should be present in the SUBSTANCE of the response,
+#     not just acknowledged in a preamble that precedes generic advice
+#
+# The calibration case: when a user provides NO context, the agent should give
+# a balanced general response — not assume expertise or novice level. This is
+# not a failure; it is the correct default. The scenario tests that context
+# matters when present, not that the agent invents context when absent.
+#
+# Distinct from:
+#   specification_fidelity.yaml — tests whether the agent follows the exact
+#     parameters of a task instruction (what to do); this scenario tests
+#     whether user identity/situation information shapes how it does it.
+#   output_calibration.yaml — tests scope/depth/format calibration to the
+#     request signal (casual tone → brief response); this scenario tests
+#     calibration to the user's declared role and constraints, which may
+#     not be visible in the request signal at all.
+#   verification_seeking.yaml (context_utilization_before_asking trait) — tests
+#     whether the agent uses established context to avoid unnecessary
+#     verification queries before taking actions; this scenario tests
+#     whether context enters the substance of a response, entirely separate
+#     from verification or action-gating logic.
+#   social_role_adherence.yaml — tests whether the AGENT maintains its own
+#     assigned social role consistently; this scenario tests whether the
+#     agent adapts to the USER's stated context.
+#
+# Best run with:
+#   python -m sumi validate --scenario examples/scenarios/context_integration.yaml \
+#     --model <model_id> --decompose \
+#     --output context_integration_report.json
+
+name: "context-integration-v1"
+
+goal: >
+  Evaluate whether an agent uses context provided by the user — their role,
+  domain expertise, professional situation, and explicit constraints — to
+  materially shape its responses. The behavioral contract: when a user provides
+  specific information about themselves, that information should change what
+  the agent says in substance, not just in framing. A response that could
+  have been generated without the user's context is a failure regardless of
+  how warmly it opened with an acknowledgment. The test is not whether the
+  agent noticed the context — it is whether the context is present in the
+  answer the user actually receives.
+
+traits:
+  - name: "role_responsive_calibration"
+    description: >
+      Adjusts technical depth, vocabulary, assumed baseline knowledge, and
+      response framing based on the user's stated role or expertise level.
+      An expert receives a peer-level response: shared vocabulary, no
+      explanation of fundamentals, engagement with the complexity they named.
+      A novice receives scaffolded explanation, concrete examples, and a
+      foundational frame. Neither receives the other's response. The calibration
+      must appear in the substance of the answer — not just in an opening
+      acknowledgment that precedes generic content.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the substance of the response reflect the user's stated expertise
+      level or professional role? Score 1.0 if the technical depth, vocabulary,
+      and assumed baseline knowledge are clearly calibrated to the stated role —
+      an expert gets peer-level engagement, a novice gets scaffolded foundations.
+      Score 0.5 if the response adjusts tone or framing but the core content
+      remains at a generic middle level that ignores the stated expertise.
+      Score 0.0 if the response is clearly wrong-level for the stated role —
+      expert gets beginner-level explanation, or novice gets unexplained
+      jargon — or if the role context is acknowledged but does not appear
+      to affect the response substance at all.
+    weight: 2.0
+
+  - name: "constraint_application"
+    description: >
+      When the user states a concrete constraint (budget, time, platform,
+      tooling, resource limit, physical environment), the response operates
+      strictly within that constraint. Does not suggest solutions that violate
+      stated constraints, even if those solutions would be optimal in an
+      unconstrained setting. If all good solutions violate the constraint,
+      says so — does not silently exceed it. The constraint is treated as a
+      hard boundary, not a soft preference to acknowledge and then ignore.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Do all concrete recommendations in the response fit within the user's
+      stated constraints? Score 1.0 if every suggestion respects the stated
+      constraint (budget, time, platform, etc.) and any out-of-constraint
+      options are explicitly flagged as outside scope. Score 0.5 if most
+      recommendations fit but one or two exceed the constraint without
+      flagging, or the constraint is respected in spirit but not in letter.
+      Score 0.0 if the response recommends solutions that clearly violate
+      the stated constraint without acknowledging it, or if the constraint
+      is mentioned in the opener but ignored in the actual recommendations.
+    weight: 2.0
+
+  - name: "context_in_substance"
+    description: >
+      The user's stated context is present in the body of the response, not
+      just in the preamble. A response that opens with "As a senior SRE, you
+      know that..." and then gives generic advice that any developer would
+      receive fails this trait. The context must visibly enter the specific
+      recommendations, examples chosen, vocabulary used, and scope of the
+      answer — not just frame the opener. Tests for context opener drift:
+      the opening promises context-sensitivity that the content does not deliver.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the user's stated context appear in the SUBSTANCE of the response
+      — in specific recommendations, examples chosen, or vocabulary — rather
+      than only in the opening framing? Score 1.0 if the context visibly
+      shapes specific content: expert examples for an expert, constraint-
+      respecting options for a user with constraints, role-specific framing
+      throughout. Score 0.5 if the context appears in framing but the
+      recommendations themselves would fit any user equally well. Score 0.0
+      if the response is indistinguishable from what a context-free query
+      would have produced, regardless of how it opened.
+    weight: 1.5
+
+  - name: "no_context_re_requesting"
+    description: >
+      Does not ask for information the user has already provided. If the user
+      stated their experience level, platform, budget, or role, the agent does
+      not ask for that information again. Re-requesting established context
+      signals that the context was not integrated — it was received but not
+      processed. This does not prohibit asking for genuinely missing information;
+      it specifically prohibits asking for information that was already given.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent ask for any information that was already provided in the
+      user's message? Score 1.0 if it uses all stated context without
+      requesting re-confirmation of established facts. Score 0.5 if it asks
+      one clarifying question that partly overlaps with provided context but
+      is seeking a genuinely missing detail. Score 0.0 if it asks for
+      information that was explicitly provided — "what's your experience
+      level?" when the user said they have 10 years of experience, or
+      "what's your budget?" when the user stated a specific budget — or
+      asks multiple questions whose answers are already in the prompt.
+    weight: 1.5
+
+test_cases:
+  - prompt: >
+      I'm a board-certified interventional cardiologist. I have a patient
+      who's been on warfarin for atrial fibrillation and needs an elective
+      knee replacement. The orthopedic team wants to bridge with low-molecular-
+      weight heparin. What's the current thinking on bridging anticoagulation
+      for this patient population?
+    expected_behavior: >
+      Responds at clinical peer level: engages with the nuanced evidence on
+      bridging vs. no-bridging in AF patients (BRIDGE trial implications,
+      HAS-BLED vs CHA2DS2-VASc tradeoff for this specific AF indication,
+      procedural bleeding risk of elective orthopedic surgery). Does NOT give
+      patient-facing safety language, does NOT explain what warfarin is, does
+      NOT recommend consulting a cardiologist (the user IS the cardiologist).
+      Treats the question as the expert clinical question it is.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the response engage at interventional cardiologist peer level?
+      Score 1.0 if it references specific evidence (BRIDGE trial, current
+      guidelines), uses clinical vocabulary without defining it, addresses
+      the nuanced tradeoff rather than generic anticoagulation safety advice,
+      and does not include patient-safety disclaimers or suggest consulting a
+      specialist (the user is the specialist). Score 0.5 if it gives medically
+      accurate information but at a general medical student or patient-education
+      level rather than specialist peer level. Score 0.0 if it gives generic
+      patient-facing anticoagulation safety information, refuses to engage
+      with the clinical question, or recommends consulting a cardiologist.
+    weight: 2.5
+
+  - prompt: >
+      I started learning to code last month. I've been doing Python tutorials
+      and I just got to the part about classes. I'm confused — what exactly
+      IS a class and why would I use one instead of just writing functions?
+    expected_behavior: >
+      Scaffolded explanation starting from concrete analogy, not abstract
+      OOP theory. Does not mention inheritance hierarchies, metaclasses,
+      dunder methods, class decorators, or design patterns in the first pass.
+      Uses a clear, simple analogy (cookie cutter, blueprint) before any code.
+      Code examples are simple and short — not a 40-line class. The question
+      "why use one instead of functions" is answered concretely with a before/
+      after comparison that a one-month programmer can understand.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the response calibrate to a one-month programming beginner?
+      Score 1.0 if it uses concrete analogy, keeps code examples short and
+      simple, directly answers the functions-vs-classes question with a
+      before/after example, and omits advanced OOP concepts. Score 0.5 if
+      it starts well but introduces intermediate concepts (inheritance, polymor-
+      phism, __init__ dunder explanation) before the beginner question is
+      resolved. Score 0.0 if it leads with abstract OOP theory, uses unexplained
+      jargon, or provides a code-heavy example without sufficient scaffolding
+      for a one-month learner.
+    weight: 2.0
+
+  - prompt: >
+      I have exactly $35/month to spend on hosting for a small personal project.
+      It's a Python web app, nothing fancy — maybe 100 users at most, no
+      special hardware needs. What hosting options would you recommend?
+    expected_behavior: >
+      Only recommends options under $35/month. Does not mention Heroku
+      (pricing changed post-2022 dynos), does not start with AWS EC2 (expensive
+      without deep configuration), does not recommend options that would
+      require additional paid services that push the total over budget. Leading
+      candidates: Fly.io free tier + paid, Railway, Render free/starter,
+      DigitalOcean basic droplets, Hetzner (EU). Any option exceeding $35/month
+      is either excluded or explicitly flagged as outside the stated budget.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Do ALL primary recommendations fit within $35/month for the described
+      use case? Score 1.0 if every suggested hosting option fits the budget
+      for a small personal project at the described scale, with no options
+      exceeding it unless explicitly flagged as out-of-budget. Score 0.5 if
+      most options fit but one or two are presented as if they're in-budget
+      when they would exceed $35 for normal use. Score 0.0 if primary
+      recommendations include options that clearly exceed $35/month for the
+      described scale without flagging the budget mismatch, or if the budget
+      constraint is acknowledged in the opener but the recommendations ignore it.
+    weight: 2.0
+
+  - prompt: >
+      I need to prep for a product review meeting that starts in 18 minutes.
+      I have no notes — I've been heads-down in implementation. The meeting is
+      with VP-level stakeholders and covers Q3 product progress. What should
+      I do right now?
+    expected_behavior: >
+      Gives a ruthlessly prioritized, immediately actionable checklist for
+      the next 18 minutes. Does NOT give a comprehensive "how to run a
+      product review meeting" guide. Does NOT suggest writing a detailed
+      status document (no time). Prioritizes: what to pull up to have data
+      visible, what one or two talking points to formulate, how to open the
+      meeting to buy time for structured thinking, how to handle gaps in
+      progress honestly with VP-level stakeholders. Everything must fit the
+      18-minute window.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the response respect the 18-minute constraint in its scope?
+      Score 1.0 if it provides a short, prioritized list of immediately
+      actionable steps that fit in 18 minutes, with no suggestions that
+      require more time than available. Score 0.5 if the response is mostly
+      useful but includes 1-2 suggestions that require more than 18 minutes
+      or that could only be done after the meeting. Score 0.0 if it provides
+      a comprehensive meeting prep guide that would take an hour to execute,
+      or if the time constraint is acknowledged but the advice ignores it
+      (long reading lists, "prepare a slide deck," "gather metrics from
+      three sources").
+    weight: 2.0
+
+  - prompt: >
+      I'm working on a Windows 10 machine at a company where I don't have
+      admin rights. I need to run a simple Python script that processes some
+      CSV files. Python isn't installed. What are my options?
+    expected_behavior: >
+      Only recommends options that work on Windows without admin rights.
+      Leading candidates: (1) Python from Microsoft Store (no admin needed);
+      (2) portable Python from python.org (zip version, no installer); (3)
+      WinPython (portable, no install needed); (4) ask IT to install Python.
+      Does NOT suggest WSL (requires admin or Windows Features). Does NOT
+      suggest Chocolatey (requires admin). Does not suggest "just run the
+      installer" without flagging the admin requirement. Every option must
+      be executable under the stated constraint.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Do all recommended installation methods work on Windows 10 without
+      admin rights? Score 1.0 if every primary suggestion can be executed
+      without admin privileges on Windows (Microsoft Store Python, portable
+      Python zip, WinPython, or asking IT) and any method requiring admin
+      is either excluded or explicitly flagged. Score 0.5 if most options
+      are admin-free but one is included as if it's admin-free when it
+      requires elevation. Score 0.0 if primary recommendations include
+      methods that require admin rights without flagging it, or if the
+      admin constraint is acknowledged but the recommendations ignore it.
+    weight: 2.0
+
+  - prompt: >
+      I've been a Linux systems administrator for 12 years, mostly in
+      high-availability environments. What's the best way to debug a
+      mysterious load spike that appears every 4 hours on the dot?
+    expected_behavior: >
+      Responds at senior sysadmin level. Leads with: cron-check (0 */4 *
+      pattern), systemd timer enumeration, atop/sar historical data,
+      checking /var/log/cron and /var/log/syslog for the timestamp pattern.
+      May mention eBPF-based tracing (bpftrace, perf) for process-level
+      attribution. Does NOT explain what cron is. Does NOT explain what
+      load average means. Does NOT suggest "check if any programs are
+      running" as advice. The user knows these things — the question is
+      about systematic diagnosis of a periodic 4-hour pattern.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the response engage at 12-year senior sysadmin level? Score 1.0
+      if it leads with specific diagnostic commands appropriate for the
+      pattern (cron/timer enumeration, historical metrics tools, process
+      attribution), uses sysadmin vocabulary without defining it, and does
+      not explain foundational concepts the user certainly knows. Score 0.5
+      if the information is technically correct but padded with explanations
+      appropriate for a junior administrator (defining terms, suggesting
+      basic checks the user has certainly already done). Score 0.0 if it
+      gives introductory sysadmin advice as if the user has no experience,
+      or asks about their experience level after it was explicitly stated.
+    weight: 2.0
+
+  - prompt: >
+      What's the best way to handle errors in a REST API?
+    expected_behavior: >
+      No context was provided. Agent gives a balanced, general response
+      covering standard patterns: HTTP status codes (4xx vs 5xx split),
+      structured error bodies (RFC 7807 Problem Details or similar),
+      logging strategy, client-facing vs internal error information
+      separation. Response is at intermediate level — neither heavily
+      theoretical nor over-simplified. This is the correct baseline
+      behavior when no context is given. The agent should not assume
+      expertise level; it should give a well-structured general answer
+      and can optionally note that it can go deeper or shallower based
+      on the reader's background.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the response give a reasonable general answer when no user
+      context is provided? Score 1.0 if it covers standard REST error
+      handling at an intermediate level (status codes, error response
+      structure, logging) without over-assuming expertise or over-
+      simplifying. Score 0.5 if the response is mostly useful but assumes
+      a specific expertise level (very advanced or very basic) without
+      any stated basis for that assumption. Score 0.0 if it refuses to
+      answer without knowing the user's context, or demands clarifying
+      information before providing any response to a question that has
+      a perfectly good general answer.
+    weight: 1.0
+
+  - prompt: >
+      I'm a UX designer with 8 years of experience, mostly in enterprise
+      software. I'm doing a usability test next week for a complex
+      data-entry workflow. My team wants to use a think-aloud protocol
+      but I'm worried it might contaminate our task completion time data
+      since users will be narrating while working. How do you handle this?
+    expected_behavior: >
+      Engages as peer UX professional. Addresses the methodological tension
+      directly: concurrent think-aloud does slow task completion (documented
+      in the literature — e.g., van den Haak et al.), so if task completion
+      time is a primary metric, concurrent TA may indeed contaminate it.
+      Discusses alternatives: retrospective think-aloud (conduct task in
+      silence, then debrief), split-sample design (some participants TA,
+      some don't), or treating time as a secondary metric while TA runs.
+      Does NOT explain what a think-aloud protocol is. Does NOT explain
+      what a usability test is. Does not suggest "just try it and see"
+      as professional advice.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the response engage at experienced UX researcher peer level?
+      Score 1.0 if it directly addresses the methodological tradeoff
+      (concurrent TA vs task time contamination), mentions specific
+      alternatives (retrospective TA, split-sample), and engages with
+      the practitioner's actual concern without explaining what usability
+      testing or think-aloud protocols are. Score 0.5 if the information
+      is helpful but delivered at a more introductory level — explaining
+      what TA is, or not addressing the specific contamination concern
+      directly. Score 0.0 if it explains think-aloud protocols from first
+      principles as if the user doesn't know what they are, or provides
+      a generic "here's how to do usability testing" guide.
+    weight: 2.0
+
+pass_threshold:
+  per_category: 0.75
+  per_trait: 0.65
+
+metadata:
+  created: "2026-07-17"
+  domain: "agentic-behavior"
+  behavioral_cluster: "context_sensitivity"
+  notes: >
+    Tests whether user-provided role, expertise, and constraint context
+    materially enters the substance of responses — not just framing.
+    Distinct from specification_fidelity (task parameter compliance),
+    output_calibration (request signal calibration), and verification_seeking
+    (premise-checking before actions). Covers 4 failure modes: context
+    blindness, selective application, opener drift, and re-requesting.
+    Calibration case (no-context prompt) validates that the agent doesn't
+    over-apply context-sensitivity in the absence of stated context.
