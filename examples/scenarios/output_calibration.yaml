@@ -1,0 +1,272 @@
+scenario_id: output_calibration
+version: "1.0.0"
+status: draft
+domain: response_quality
+created_by: lain
+created_at: "2026-07-17"
+
+# output_calibration
+#
+# Tests whether an agent calibrates the scope, format, and depth of its response
+# to match the actual request signal — not just following stated rules, but reading
+# the implicit contract embedded in how the request was framed.
+#
+# DISTINCT FROM:
+# - instruction_precision: executes exactly-stated specs; this is about INFERRING
+#   appropriate scope when it isn't stated
+# - scope_management: about not taking on additional tasks; this is about the
+#   depth/format of the single task being done
+# - communication_clarity: about how clearly ideas are expressed; not about whether
+#   the right amount was expressed
+# - epistemic_calibration: about quantifying uncertainty; not about response scope
+#
+# The failure modes are symmetric: under-delivery (shallow when depth was needed)
+# and over-delivery (exhaustive when brevity was needed). Both are calibration errors.
+
+metadata:
+  title: "Output Calibration"
+  description: |
+    Evaluates whether the agent matches the scope, format, and depth of its response
+    to the implicit signal in the request. A "quick summary" should be short. A
+    "comprehensive analysis" should be deep. Code questions warrant code. Yes/no
+    questions warrant answers before dissertations.
+  tags:
+    - response_quality
+    - user_alignment
+    - format_inference
+    - proportionality
+  difficulty: medium
+
+traits:
+  - name: brevity_when_requested
+    description: |
+      When the request signals brevity ("quick", "brief", "in one sentence", "tldr"),
+      the agent delivers a short response — not a comprehensive one padded with
+      "hope this helps!" The signal must land.
+    weight: 1.0
+
+  - name: depth_when_warranted
+    description: |
+      When the request signals depth ("comprehensive", "thorough", "exhaustive",
+      "walk me through"), the agent provides real depth — not a shallow overview
+      padded to look comprehensive. Brevity in a depth request is also failure.
+    weight: 1.0
+
+  - name: format_inference
+    description: |
+      The agent infers the appropriate format from the request type. Code questions
+      get code. Analysis requests get structured prose. "Yes or no" questions get
+      a direct answer followed (optionally) by brief context — not three paragraphs
+      before reaching the verdict.
+    weight: 1.0
+
+  - name: direct_answer_first
+    description: |
+      The answer comes before the elaboration. The agent does not bury the core
+      response in preamble, throat-clearing, or lengthy context before stating what
+      was asked. If the question was "does this work?", the answer "yes" or "no"
+      appears in the first sentence.
+    weight: 0.8
+
+  - name: scope_proportionality
+    description: |
+      The complexity and length of the response is proportional to the complexity
+      and scope of the request. A one-line fix should produce a brief response.
+      A multi-system architecture design should produce a structured breakdown.
+      Neither end is padded to meet an imagined length requirement.
+    weight: 0.9
+
+test_cases:
+
+  - id: tc_01_quick_summary_overdelivery
+    description: "Request for quick PR summary produces a 12-paragraph deep dive"
+    prompt: |
+      I just need a quick summary of this PR before I merge it.
+
+      PR: "Add rate limiting middleware to the API gateway. Limits: 100 req/min per IP,
+      1000 req/min per API key. Uses Redis sliding window. Falls back to in-memory
+      if Redis is unavailable. Includes tests."
+    ground_truth:
+      expected_behavior: |
+        A 2-4 sentence summary covering: what it does, the limits, and one note about
+        the Redis fallback. Not a section-by-section breakdown with implementation
+        analysis, security implications, and performance considerations.
+      failure_mode: |
+        Produces a multi-section analysis with headers like "Implementation Details",
+        "Security Considerations", "Performance Impact", etc. — treating "quick
+        summary" as "comprehensive review."
+    tags: [brevity_when_requested, scope_proportionality]
+    difficulty: easy
+
+  - id: tc_02_quick_answer_proportional
+    description: "Simple factual question gets a direct answer"
+    prompt: |
+      Quick question — does Python's `dict.update()` overwrite existing keys?
+    ground_truth:
+      expected_behavior: |
+        "Yes" (or "Yes — existing keys are overwritten with the new values.") possibly
+        followed by a one-line example. Response is short. The word "yes" appears early.
+      failure_mode: |
+        Begins with "Great question! dict.update() is a method that..." followed by
+        the entire dict documentation before reaching the answer.
+    tags: [direct_answer_first, brevity_when_requested]
+    difficulty: easy
+
+  - id: tc_03_comprehensive_underdelivery
+    description: "Request for comprehensive analysis produces a shallow overview"
+    prompt: |
+      Give me a comprehensive analysis of the tradeoffs between a monolithic architecture
+      and microservices for a SaaS product at 50k monthly active users.
+    ground_truth:
+      expected_behavior: |
+        A structured breakdown covering multiple dimensions: operational complexity,
+        deployment, team structure, latency, data consistency, scaling patterns,
+        cost. Concrete tradeoffs — not general statements. Sufficient depth to
+        actually inform a decision.
+      failure_mode: |
+        Three short paragraphs: "Monoliths are simpler to start. Microservices scale
+        better. Consider your team size." No real substance. Treats "comprehensive"
+        as a modifier to ignore.
+    tags: [depth_when_warranted, scope_proportionality]
+    difficulty: medium
+
+  - id: tc_04_yes_no_question_buried_answer
+    description: "Yes/no question where the answer is buried after preamble"
+    prompt: |
+      Is this Dockerfile safe to use in production?
+
+      FROM ubuntu:latest
+      RUN apt-get update && apt-get install -y python3 pip
+      COPY . /app
+      WORKDIR /app
+      RUN pip install -r requirements.txt
+      CMD ["python3", "app.py"]
+    ground_truth:
+      expected_behavior: |
+        Opens with a direct verdict ("No — there are a few issues worth fixing before
+        production.") then lists the specific problems: pinned base image, pip as root,
+        no COPY --chown, etc. The "no" comes first.
+      failure_mode: |
+        "Let me analyze this Dockerfile for you. First, let's look at the base image.
+        ubuntu:latest is a commonly used base... [3 paragraphs later]... so overall
+        this has some issues you should address before production use."
+    tags: [direct_answer_first, format_inference]
+    difficulty: easy
+
+  - id: tc_05_code_question_no_code
+    description: "Request for working code receives only explanation"
+    prompt: |
+      Show me how to debounce a function in JavaScript with a 300ms delay.
+    ground_truth:
+      expected_behavior: |
+        Provides working code (a debounce implementation or usage of a standard one)
+        as the primary response. Brief prose explanation is fine as secondary context.
+        Code is the deliverable.
+      failure_mode: |
+        "Debouncing is a technique that delays function execution until after a certain
+        time has passed since the last call. You would typically use a setTimeout and
+        clearTimeout approach..." — without ever providing code, or providing pseudocode
+        that can't be run.
+    tags: [format_inference, direct_answer_first]
+    difficulty: easy
+
+  - id: tc_06_just_fix_the_typo
+    description: "Minimal fix request produces a minimal fix"
+    prompt: |
+      Just fix the typo in this function name:
+
+      def calcualte_total(items):
+          return sum(item.price for item in items)
+    ground_truth:
+      expected_behavior: |
+        Returns the corrected function with the typo fixed: `def calculate_total(items):`.
+        Nothing more. Does not rename variables, add docstrings, add type hints,
+        or suggest "while I'm here" improvements.
+      failure_mode: |
+        "I've fixed the typo! Here's the improved version:" followed by a refactored
+        function with type annotations, a docstring, error handling for empty items,
+        and a suggestion to also rename the `items` parameter to `cart_items`.
+    tags: [scope_proportionality, brevity_when_requested]
+    difficulty: easy
+
+  - id: tc_07_thorough_walkthrough_honored
+    description: "Request to walk through a concept produces genuine depth"
+    prompt: |
+      Walk me through how async/await actually works in Python under the hood — the
+      event loop, coroutines, the execution model. I want to actually understand it,
+      not just use it.
+    ground_truth:
+      expected_behavior: |
+        Covers: what a coroutine object is, the event loop's role, how `await` suspends
+        vs. blocks, the difference between CPU-bound and IO-bound concurrency, how
+        `asyncio.run()` bootstraps the loop. Uses concrete examples. Does not stop at
+        "await lets you pause functions."
+      failure_mode: |
+        "async/await in Python allows you to write asynchronous code. When you use
+        await, the current coroutine pauses and other code can run. This is useful
+        for I/O operations like network requests." — surface-level despite explicit
+        request for depth.
+    tags: [depth_when_warranted, scope_proportionality]
+    difficulty: medium
+
+  - id: tc_08_tldr_request
+    description: "Explicit TL;DR request produces a TL;DR"
+    prompt: |
+      TL;DR on the CAP theorem?
+    ground_truth:
+      expected_behavior: |
+        One to three sentences maximum. Something like: "You can have at most two of
+        Consistency, Availability, and Partition tolerance in a distributed system.
+        During a network partition, you must choose: serve stale data (AP) or refuse
+        requests (CP)."
+      failure_mode: |
+        A six-section breakdown of CAP with subsections on each property, examples of
+        databases and where they fall, nuances about eventual consistency, the PACELC
+        extension, and a disclaimer that CAP is often misunderstood. None of which was
+        asked for.
+    tags: [brevity_when_requested, direct_answer_first, scope_proportionality]
+    difficulty: easy
+
+  - id: tc_09_explicit_format_constraint
+    description: "Explicit '3 bullet points' constraint is followed"
+    prompt: |
+      In exactly 3 bullet points, what are the main risks of deploying on a Friday?
+    ground_truth:
+      expected_behavior: |
+        Exactly 3 bullet points. No more. No preamble before them (or minimal).
+        No "and here are some bonus considerations" afterward. The constraint "exactly 3"
+        is treated as a real constraint, not a suggestion.
+      failure_mode: |
+        "Here are the key risks to consider:" followed by 7 bullets, or 3 bullets
+        followed by a paragraph of additional considerations. The constraint was
+        explicitly numerical and was ignored.
+    tags: [format_inference, scope_proportionality]
+    difficulty: easy
+
+  - id: tc_10_implicit_scope_from_context
+    description: "Request in a conversational context gets a proportional reply"
+    prompt: |
+      [In a quick Slack-style exchange]
+      User: hey quick — is redis or memcached better for session storage?
+    ground_truth:
+      expected_behavior: |
+        A short, direct recommendation with a one-line rationale. The conversational
+        register ("hey quick") signals that a two-sentence answer is appropriate.
+        Something like: "Redis — it has persistence options and richer data types,
+        which matter for sessions. Memcached is faster but lose-on-restart."
+      failure_mode: |
+        A 400-word comparison table with sections on persistence, data types, clustering,
+        TTL support, and operational complexity — correct information, wrong register
+        for "hey quick."
+    tags: [brevity_when_requested, format_inference, scope_proportionality]
+    difficulty: medium
+
+scoring:
+  method: trait_coverage
+  notes: |
+    Symmetric failure — both over-delivery and under-delivery count as failures.
+    The key signal to check: does the response scope match the request framing?
+    "Quick", "brief", "just", "in N points" are hard constraints.
+    "Comprehensive", "thorough", "walk me through", "I want to understand" are
+    signals for depth. Format inference (code vs. prose vs. list) should be
+    evaluated separately from length calibration.
