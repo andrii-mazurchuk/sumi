@@ -24,7 +24,6 @@ from sumi.reports.json_report import print_summary, save_report
 from sumi.reports.markdown_report import render_from_json, save_report_md
 from sumi.runner import SumiRunner
 from sumi.scenario import load_scenario
-from sumi.utils.ranking import find_statistical_ties, load_reports, rank_reports
 
 
 @click.group()
@@ -127,6 +126,8 @@ def compare(reports: tuple[str, ...], bootstrap: int) -> None:
     if len(reports) < 2:
         click.echo("Error: at least two report files are required.", err=True)
         sys.exit(1)
+
+    from sumi.utils.ranking import find_statistical_ties, load_reports, rank_reports
 
     click.echo(f"Loading {len(reports)} reports...")
     try:
@@ -307,6 +308,160 @@ def batch_verify(
     )
     click.echo(f"JSON report: {json_path}")
     click.echo(f"Markdown report: {md_path}")
+
+
+@cli.command()
+@click.option("--scenario", required=True, type=click.Path(exists=True), help="Path to scenario YAML")
+@click.option("--test-case", "test_case_index", default=None, type=int, help="Score only this test case (0-based index)")
+@click.option("--response", default=None, help="Response text to score")
+@click.option("--response-file", default=None, type=click.Path(), help="Read response from file (use - for stdin)")
+@click.option("--responses-dir", default=None, type=click.Path(exists=True, file_okay=False), help="Directory of N.txt files, one per test case")
+@click.option("--output", default=None, type=click.Path(), help="Save full JSON report to this path")
+@click.option("--no-judge", is_flag=True, default=True, help="Skip LLM judge (default: True, offline mode)")
+@click.option("--enable-judge", "enable_judge", is_flag=True, default=False, help="Enable LLM judge (requires ANTHROPIC_API_KEY)")
+def score(
+    scenario: str,
+    test_case_index: int | None,
+    response: str | None,
+    response_file: str | None,
+    responses_dir: str | None,
+    output: str | None,
+    no_judge: bool,
+    enable_judge: bool,
+) -> None:
+    """Score a manually provided response against a scenario rubric.
+
+    \b
+    Single response (one test case):
+        sumi score --scenario examples/scenarios/handoff_quality.yaml \\
+                   --test-case 0 --response "My answer..."
+
+    Batch mode (one file per test case):
+        sumi score --scenario examples/scenarios/handoff_quality.yaml \\
+                   --responses-dir path/to/responses/
+    """
+    import json as _json
+
+    from sumi.harness.static_harness import StaticHarness
+    from sumi.reports.json_report import save_report
+    from sumi.runner import SumiRunner
+
+    loaded = load_scenario(scenario)
+    scenario_name = Path(scenario).name
+    use_judge = enable_judge and not no_judge
+
+    # ── Batch mode ─────────────────────────────────────────────────────────────
+    if responses_dir is not None:
+        responses_path = Path(responses_dir)
+        results_all = []
+        for idx, tc in enumerate(loaded.test_cases):
+            txt_file = responses_path / f"{idx}.txt"
+            if not txt_file.exists():
+                click.echo(f"  [SKIP] test case {idx} — {txt_file} not found", err=True)
+                continue
+            resp_text = txt_file.read_text(encoding="utf-8").strip()
+            filtered = loaded.with_only_case(idx)
+            harness = StaticHarness(resp_text)
+            runner = SumiRunner(
+                scenario=filtered,
+                harness=harness,
+                enable_judge=use_judge,
+            )
+            sc = runner.run_static()
+            r = sc.test_case_results[0]
+            status = "PASS" if r.passed else "FAIL"
+            click.echo(f"  [{status}] case {idx:<3d}  score={r.score:.3f}  {tc.id}")
+            results_all.append((idx, r))
+        if not results_all:
+            click.echo("No test cases scored.", err=True)
+            sys.exit(1)
+        scores = [r.score for _, r in results_all]
+        click.echo(f"\nAggregate: {sum(scores)/len(scores):.3f}  ({len(results_all)} cases)")
+        return
+
+    # ── Single response mode ────────────────────────────────────────────────────
+    if response is None and response_file is None:
+        click.echo("Error: provide --response TEXT or --response-file PATH (or - for stdin)", err=True)
+        sys.exit(1)
+
+    if response_file is not None:
+        if response_file == "-":
+            resp_text = sys.stdin.read().strip()
+        else:
+            resp_text = Path(response_file).read_text(encoding="utf-8").strip()
+    else:
+        resp_text = response or ""
+
+    # Optionally filter to a single test case
+    if test_case_index is not None:
+        if test_case_index < 0 or test_case_index >= len(loaded.test_cases):
+            click.echo(
+                f"Error: --test-case {test_case_index} out of range "
+                f"(scenario has {len(loaded.test_cases)} test cases, index 0-{len(loaded.test_cases)-1})",
+                err=True,
+            )
+            sys.exit(1)
+        active_scenario = loaded.with_only_case(test_case_index)
+        case_label = f"test case {test_case_index}"
+    else:
+        active_scenario = loaded
+        case_label = "all test cases"
+
+    harness = StaticHarness(resp_text)
+    runner = SumiRunner(
+        scenario=active_scenario,
+        harness=harness,
+        enable_judge=use_judge,
+    )
+    sc = runner.run_static()
+
+    # ── Output ──────────────────────────────────────────────────────────────────
+    threshold = active_scenario.pass_threshold.per_category
+    click.echo(f"\nSUMI Score — {scenario_name} ({case_label})")
+    click.echo(f"Model: static-eval (manually provided response)")
+
+    preview = resp_text[:120].replace("\n", " ")
+    click.echo(f'\nResponse (preview):\n  "{preview}{"..." if len(resp_text) > 120 else ""}"')
+
+    click.echo("\n=== Test Case Results ===")
+    col = max(len(r.test_case_id) for r in sc.test_case_results)
+    for r in sc.test_case_results:
+        if r.skipped:
+            click.echo(f"  {r.test_case_id:<{col}}  SKIP  ({r.skip_reason})")
+        else:
+            verdict = "PASS" if r.passed else "FAIL"
+            click.echo(f"  {r.test_case_id:<{col}}  {r.score:.3f}  [{verdict}]  via {r.evaluator}")
+
+    verdict_str = "pass" if sc.passed else "fail"
+    click.echo(f"\n=== Aggregate ===")
+    click.echo(f"Score: {sc.aggregate_score:.3f}  Verdict: {verdict_str}  (threshold {threshold:.2f})")
+    if sc.confidence_interval:
+        lo, hi = sc.confidence_interval
+        click.echo(f"95% CI: [{lo:.3f}, {hi:.3f}]")
+
+    # Show LLM judge explanations if enabled
+    if use_judge:
+        judge_cases = [r for r in sc.test_case_results if r.explanation and not r.skipped]
+        if judge_cases:
+            click.echo("\n=== LLM Judge Reasoning ===")
+            for r in judge_cases:
+                click.echo(f"\n[{r.test_case_id}]")
+                click.echo(f'  "{r.explanation}"')
+
+    if output:
+        # Wrap in a minimal ValidationReport for JSON output
+        from sumi.models import ValidationReport
+        report = ValidationReport(
+            scenario_name=active_scenario.name,
+            model_id="static-eval",
+            static_coverage=sc,
+            overall_verdict=verdict_str,
+            confidence=round(sc.aggregate_score, 3),
+            categories_run=["static_coverage"],
+            metadata={"test_case_index": test_case_index, "judge_enabled": use_judge},
+        )
+        path = save_report(report, output)
+        click.echo(f"\nReport saved: {path}")
 
 
 def main() -> None:

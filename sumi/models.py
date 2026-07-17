@@ -82,6 +82,18 @@ class ValidationScenario(BaseModel):
             raise ValueError("scenario must define at least one test_case")
         return self
 
+    def with_only_case(self, index: int) -> "ValidationScenario":
+        """Return a copy of this scenario containing only the test case at index."""
+        return ValidationScenario(
+            name=self.name,
+            goal=self.goal,
+            traits=self.traits,
+            test_cases=[self.test_cases[index]],
+            pass_threshold=self.pass_threshold,
+            temporal_turns=self.temporal_turns,
+            metadata=self.metadata,
+        )
+
 
 # ─── Result models ────────────────────────────────────────────────────────────
 

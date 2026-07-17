@@ -9,8 +9,6 @@ Embeddings are cached by text hash within a run to avoid redundant encoding.
 import hashlib
 from typing import Any, Optional
 
-import numpy as np
-
 from sumi.evaluators.base import Evaluator
 from sumi.models import TestCase, ValidationScenario
 
@@ -28,7 +26,7 @@ class EmbeddingEvaluator(Evaluator):
     def __init__(self, model_name: str = MODEL_NAME) -> None:
         self._model_name = model_name
         self._model: Any = None
-        self._cache: dict[str, np.ndarray] = {}
+        self._cache: dict[str, Any] = {}
 
     @property
     def name(self) -> str:
@@ -46,7 +44,7 @@ class EmbeddingEvaluator(Evaluator):
             self._model = SentenceTransformer(self._model_name)
         return self._model
 
-    def _encode(self, text: str) -> np.ndarray:
+    def _encode(self, text: str) -> Any:
         key = hashlib.md5(text.encode()).hexdigest()
         if key not in self._cache:
             self._cache[key] = self._get_model().encode(text)
@@ -65,6 +63,8 @@ class EmbeddingEvaluator(Evaluator):
 
         if not response.strip():
             return 0.0, "Empty response"
+
+        import numpy as np  # lazy import — not available in all environments
 
         response_emb = self._encode(response.strip())
         reference_emb = self._encode(test_case.reference_text.strip())

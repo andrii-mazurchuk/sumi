@@ -2,9 +2,6 @@
 Statistical utilities for Sumi evaluation results.
 """
 
-import numpy as np
-
-
 def bootstrap_ci(
     scores: list[float],
     weights: list[float],
@@ -31,6 +28,11 @@ def bootstrap_ci(
     """
     if not scores:
         return (0.0, 0.0)
+
+    try:
+        import numpy as np
+    except ImportError:
+        return None  # type: ignore[return-value]  # numpy unavailable; CI skipped
 
     s = np.array(scores, dtype=float)
     w = np.array(weights, dtype=float)
