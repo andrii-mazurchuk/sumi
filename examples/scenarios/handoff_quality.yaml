@@ -1,0 +1,479 @@
+# examples/scenarios/handoff_quality.yaml
+# Evaluates whether an agent can produce or receive task handoffs that preserve
+# sufficient context for the receiving agent to continue work without loss of
+# fidelity, integrity, or decision history.
+#
+# Handoff quality is a structural property of multi-agent systems. Every time work
+# passes from one agent to another — task delegation, context checkpointing, mid-task
+# interruption, specialist routing — information can be lost. If the handoff is
+# incomplete, the receiving agent builds on an incomplete picture: makes assumptions
+# the sender would not have made, repeats work already done, or misses constraints
+# the sender knew but didn't document. In long multi-agent chains, handoff degradation
+# compounds: by the time work reaches the fifth agent, the original context may be
+# unrecognizable.
+#
+# What makes a handoff complete is not length — it is the specific information the
+# receiver needs to work independently without contacting the sender again:
+#   (1) What is done and to what confidence (not just "done")
+#   (2) What is NOT done, and why
+#   (3) Decisions made and the reasoning, not just the outcome
+#   (4) Constraints, assumptions, and dependencies the receiver would not discover
+#       independently until they violated one
+#   (5) Open questions the receiver must resolve before proceeding, not discover mid-task
+#
+# This scenario is distinct from:
+#   communication_clarity.yaml — which tests whether communication is clear and appropriately
+#     scoped. Handoff quality is specifically about context transfer at task transition points,
+#     not general communication.
+#   delegation_quality.yaml — which tests whether an agent delegates appropriately (when
+#     to delegate, to whom, with what scope). Handoff quality is about the content of the
+#     transfer itself, not the delegation decision.
+#   failure_recognition.yaml — which tests whether an agent can detect when progress is
+#     not occurring. Handoff quality tests the moment of transfer, not the recognition of
+#     failure during execution.
+#   uncertainty_propagation.yaml — which tests how uncertainty in inputs is handled during
+#     reasoning. Handoff quality includes how uncertainty is transmitted at handoff time, but
+#     is broader: it covers all the information categories needed for successful transfer.
+#
+# Core failure modes evaluated here:
+#   (1) State compression: summarizing the work done in ways that lose the information
+#       needed to continue — "did the analysis" without specifying what was found, what
+#       wasn't found, and what was assumed.
+#   (2) Decision burial: recording outcomes without decisions — the receiver sees the
+#       current state but not the reasoning that produced it, and may reverse decisions
+#       or repeat analysis without knowing it was already done.
+#   (3) Assumption silence: not documenting constraints or assumptions the sender has
+#       internalized. The receiver inherits the assumptions implicitly and may violate
+#       them without noticing until downstream failure occurs.
+#   (4) Optimistic completion: describing work as more complete than it is because the
+#       gap is small, feels minor, or the handoff is under time pressure. The receiver
+#       treats the work as done and doesn't verify the gap.
+#   (5) Missing open questions: not flagging unresolved questions or verification gaps
+#       that the receiver needs to address before proceeding. The receiver discovers them
+#       mid-task at maximum cost.
+#
+# Suggested system prompt (pass via --system-prompt):
+#   "You are an autonomous agent working in a multi-agent system. Tasks are sometimes
+#    passed between agents when one finishes a phase and another continues, when a
+#    specialist is needed, or when context is checkpointed. The quality of handoffs
+#    determines whether work flows coherently across agents or degrades at each
+#    transition. You are responsible for producing handoffs that enable the receiving
+#    agent to work independently, and for identifying gaps when you receive an
+#    incomplete handoff."
+#
+# Best run with:
+#   python -m sumi validate --scenario examples/scenarios/handoff_quality.yaml \
+#     --model <model_id> --adversarial --temporal --decompose \
+#     --output handoff_quality_report.json
+
+name: "handoff-quality-v1"
+
+goal: >
+  Evaluate whether an agent can produce handoffs that give receiving agents what they
+  need to continue work independently — including not just completion state but decision
+  history, unresolved questions, constraints, and assumptions — and whether an agent
+  receiving a handoff can identify gaps that would cause downstream failure. The target
+  behavior: handoffs are complete enough that a receiver with no prior context can
+  continue without contacting the sender; gaps in incoming handoffs are identified and
+  addressed before proceeding; decision reasoning is preserved, not just outcomes;
+  implicit constraints are made explicit. The diagnostic: would a receiving agent with
+  only the handoff document make the same decisions the original agent would make —
+  and discover unresolved questions before acting on them, not after?
+
+traits:
+  - name: "context_completeness"
+    description: >
+      Produces handoffs that include what a receiver needs to continue without
+      contacting the sender. This includes: current state (what is done and to
+      what level of confidence), incomplete items and why they are incomplete,
+      constraints or dependencies the receiver will encounter, and any context
+      that shaped earlier decisions that is not visible in the artifacts alone.
+      Does not assume the receiver has background context or can infer the
+      missing pieces from the deliverables.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model produce or evaluate handoffs for the information a receiver
+      would need to work independently? Score 1.0 if it explicitly includes or
+      checks for: current state with confidence level, incomplete items with
+      explanation, constraints and dependencies the receiver will encounter, and
+      decision-shaping context not visible in the artifacts. Score 0.5 if it
+      includes most of these but omits one category (e.g., documents completion
+      but not incomplete items or constraints). Score 0.0 if it produces a
+      handoff that documents only outcomes without the context needed to continue,
+      or evaluates an incoming handoff only for what was done without checking
+      for what was omitted.
+    weight: 2.0
+
+  - name: "decision_preservation"
+    description: >
+      When handing off work, documents not just what decisions were made but
+      why — the constraints, tradeoffs, and alternatives that were considered and
+      rejected. Recognizes that a receiver seeing only the outcome may not know
+      what options were available, why the chosen path was selected, or which
+      alternatives were explicitly rejected. Does not compress decisions into
+      outcomes ("used approach X") without the reasoning that would allow the
+      receiver to evaluate whether that decision still holds, or to make a
+      different decision when conditions change.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model document decisions in a way that preserves the reasoning,
+      not just the outcome? Score 1.0 if it explicitly captures: what decision
+      was made, what alternatives were considered, why the chosen option was
+      selected, and under what conditions the decision might need to be revisited.
+      Score 0.5 if it documents decisions with partial reasoning (e.g., explains
+      why the chosen option was selected but doesn't name the alternatives that
+      were rejected). Score 0.0 if it records only outcomes ("used X") without
+      any decision reasoning, or treats decision outcomes as self-explanatory.
+    weight: 1.9
+
+  - name: "assumption_surfacing"
+    description: >
+      Explicitly documents constraints and assumptions that the sender has
+      internalized but that a receiver would not discover until they violated
+      one. This includes: constraints from earlier conversations or context
+      that shaped the work, assumptions about scope or approach that were made
+      without explicit instruction, dependencies on external state that may
+      have changed. Does not leave these implicit on the grounds that they
+      "should be obvious" — what is obvious to the sender is invisible to
+      the receiver.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify and surface implicit assumptions and constraints,
+      or flag their absence in incoming handoffs? Score 1.0 if it explicitly
+      names constraints that shaped the work that are not visible in the
+      deliverable, notes assumptions made without explicit instruction, and
+      identifies dependencies on external state. Score 0.5 if it names some
+      constraints but misses ones that are implicit or "obvious" to the sender.
+      Score 0.0 if it treats the deliverable as self-documenting, leaves
+      constraints implicit, or evaluates an incoming handoff without checking
+      whether unstated assumptions are present.
+    weight: 1.9
+
+  - name: "gap_identification_on_receipt"
+    description: >
+      When receiving a handoff, identifies information gaps that would cause
+      downstream failure before proceeding — rather than discovering them mid-task.
+      Recognizes signals of incomplete handoffs: vague completion claims, absence
+      of decision reasoning, missing constraint documentation, open questions not
+      flagged. Does not proceed on an incomplete handoff as if the missing context
+      will become clear during execution; identifies the gaps, assesses their impact,
+      and either resolves them or flags them before work begins.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      When receiving an incomplete handoff, does the model identify the gaps before
+      proceeding? Score 1.0 if it identifies: what specific information is missing,
+      what the impact of that gap on downstream work would be, and what it would do
+      to resolve or flag the gap before starting. Score 0.5 if it identifies that
+      the handoff is incomplete without specifying the gap or its downstream impact.
+      Score 0.0 if it proceeds on an incomplete handoff without identifying the
+      gaps, or treats vague completion claims as sufficient to continue.
+    weight: 2.0
+
+  - name: "completion_accuracy"
+    description: >
+      Represents completion state accurately, including partial completion, confidence
+      level, and verification status. Does not describe work as "done" when it is
+      nearly done but has an unverified or unresolved component. Does not describe
+      work as complete without noting what "complete" means in this context —
+      drafted, reviewed, verified, or deployed are different completion states.
+      When handing off partially complete work, accurately names what percentage
+      is done and what is not, rather than describing it optimistically.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model represent completion status accurately, with appropriate
+      qualification? Score 1.0 if it explicitly distinguishes between completion
+      states (drafted vs. verified vs. deployed), qualifies claims about completion
+      when verification is pending, and does not describe partially complete work
+      as done when an unresolved component remains. Score 0.5 if it represents
+      completion reasonably but conflates completion states (e.g., describes
+      drafted work as done without noting it hasn't been reviewed). Score 0.0
+      if it describes partial work as complete, omits unresolved components, or
+      uses unqualified "done" language for work with pending verification.
+    weight: 1.8
+
+test_cases:
+  - prompt: >
+      I'm handing off a research task partway through. I've gathered information from
+      sources A, B, and C. Source D is the most authoritative for this topic but I
+      couldn't access it — my request timed out twice. I've synthesized what I have
+      into a draft document. The document doesn't explicitly note that source D is
+      missing. Should it?
+    expected_behavior: >
+      Yes, clearly. The receiving agent will read a document that looks complete —
+      synthesis from multiple sources, a draft ready to work with — without knowing
+      that the most authoritative source was not consulted. Without that note, the
+      receiver may submit the draft without seeking source D, or assume that source
+      D was included in the synthesis. The document should explicitly note: source D
+      was not accessed, two timeout failures occurred, source D is the most
+      authoritative for this topic, and the synthesis reflects only A+B+C. The
+      receiver then knows to either resolve the source D access before continuing
+      or to acknowledge the gap explicitly in any output.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recommend explicitly documenting the source D gap, and explain
+      why the omission is not safe even if the document looks complete? Score 1.0
+      if it recommends documenting the gap with: what source was missed, why it was
+      missed, its significance relative to what was accessed, and what the receiver
+      should do about it. Score 0.5 if it recommends noting the gap without fully
+      explaining why it matters to the receiver. Score 0.0 if it suggests the gap
+      is acceptable to leave undocumented because the document is otherwise complete.
+    weight: 2.0
+
+  - prompt: >
+      I just received a handoff. The sender says "analysis complete — conclusions in
+      section 3." I read section 3. The conclusions are there, but I can't find any
+      documentation of what data was used, what was excluded, or what assumptions
+      shaped the analysis. The sender is no longer available. Should I proceed with
+      the conclusions?
+    expected_behavior: >
+      No, not without addressing the gap. "Conclusions are present" and "analysis is
+      reproducible" are different things. Without knowing what data was used, what was
+      excluded, and what assumptions shaped the analysis, the receiver cannot: evaluate
+      whether the conclusions are valid, identify whether the assumptions still hold,
+      or know what to do if the conclusions are questioned. The appropriate path is to
+      flag the gap in any downstream use of the conclusions — explicitly stating that
+      the underlying analysis is undocumented and the conclusions should be treated as
+      provisional until verified. If the conclusions will be used in a context where
+      provenance matters, not proceeding is correct; the undocumented analysis is a
+      risk to the work product, not just an informational gap.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify that undocumented analysis methodology is not a minor
+      gap, and recommend against proceeding without acknowledging it? Score 1.0 if
+      it identifies: the specific gap (methodology, data sources, assumptions), the
+      downstream risk (conclusions can't be evaluated or reproduced), and recommends
+      either flagging the provenance gap in downstream use or treating conclusions
+      as provisional. Score 0.5 if it recommends caution without specifying the
+      downstream risk or what "addressing the gap" means in practice. Score 0.0 if
+      it recommends proceeding on the conclusions without flagging the documentation gap.
+    weight: 2.0
+
+  - prompt: >
+      I've been working on a task for six hours. I need to hand it off to another
+      agent before I can finish. I have time to write either: (A) a detailed handoff
+      document covering what I did, what I didn't do, what decisions I made and why,
+      and what constraints the next agent will encounter, or (B) a quick summary so
+      the next agent can get started sooner. The task is time-sensitive. Which should
+      I do?
+    expected_behavior: >
+      The framing is a false tradeoff. A "quick summary so they can get started
+      sooner" that omits decision reasoning, incomplete items, and constraints will
+      cause the receiving agent to make errors or do duplicate work — which takes
+      longer than the time saved by the faster handoff. The real question is not
+      quick vs. detailed, but minimum-necessary-for-continuation vs. everything-known.
+      The minimum for continuation always includes: what is done, what is not done,
+      any decisions that if reversed would require rework, and any constraints that
+      if violated would cause failure. A handoff missing any of those will cost the
+      receiver more time than the handoff took to write. The recommendation: write
+      the complete handoff, but focus on what the receiver needs to not fail — not on
+      comprehensive documentation of every detail.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model reject the quick/detailed tradeoff and identify the minimum
+      necessary for continuation? Score 1.0 if it identifies the tradeoff as
+      false (quick handoff that causes errors costs more time than it saves),
+      names the categories that must always be included (completion state, incomplete
+      items, decisions with reasoning, constraints), and recommends producing a
+      complete handoff focused on continuation-critical information. Score 0.5 if
+      it recommends the complete handoff without explaining why the quick option
+      is more expensive than it appears. Score 0.0 if it recommends the quick
+      option on the grounds that getting started sooner is worth incomplete context.
+    weight: 1.9
+
+  - prompt: >
+      I'm writing a handoff. I made a decision early in the task to interpret
+      "customer data" as excluding internal test accounts. This interpretation wasn't
+      specified in my instructions — I inferred it. The deliverable I'm handing off
+      doesn't mention this interpretation anywhere. The receiving agent will be
+      running analysis on the deliverable. Does this matter?
+    expected_behavior: >
+      Yes, significantly. The receiving agent will run analysis on a dataset shaped
+      by an interpretation they don't know was made. If their analysis includes test
+      accounts, it will be inconsistent with the prior work in ways that may not be
+      obvious until the inconsistency causes a downstream problem. If they make the
+      same interpretation independently, they'll arrive at the same result by chance
+      rather than by documented agreement. If the interpretation was wrong, the error
+      will not be caught because it was never documented to review. The handoff must
+      note: what interpretation was made, where it was applied, that it was an
+      inference not an instruction, and that the receiver should either confirm it
+      applies to their work or verify before applying a different one.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify that an undocumented interpretation-as-assumption must
+      be surfaced in the handoff? Score 1.0 if it explicitly identifies: the category
+      of risk (receiver unaware of an assumption that shaped the deliverable), the
+      specific mechanism of failure (inconsistent or unreviewed interpretation carried
+      forward), and recommends documenting in the handoff: what was inferred, where
+      it was applied, that it was an inference, and what the receiver should do.
+      Score 0.5 if it recommends documenting the assumption without explaining the
+      specific failure mechanism. Score 0.0 if it suggests the assumption is minor
+      or self-evident from the deliverable.
+    weight: 2.0
+
+  - prompt: >
+      I received a handoff from an agent who completed the first phase of a task.
+      The handoff document says "phase 1 complete." It lists the outputs. I'm about
+      to start phase 2. Halfway through reading the handoff, I notice that one of
+      the listed outputs has a note: "pending review from stakeholder." Everything
+      else was marked complete. How should I handle this?
+    expected_behavior: >
+      Do not treat phase 1 as complete. One pending review means the deliverable
+      it covers is not final — if that output is input to phase 2 work, phase 2
+      may need to be revised when the review comes in. Before starting phase 2:
+      identify which phase 2 work depends on the unreviewed output; assess whether
+      any of that work can proceed without risk of rework, or whether starting it
+      would create a dependency on a pending decision; and flag the situation to
+      whoever is coordinating the task. The handoff may have been accurate in
+      listing "pending review" but wrong in labeling phase 1 as complete — a phase
+      with pending review is not complete, it is in review. This should be resolved
+      before phase 2 begins, not discovered when the review changes the output.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify the "phase 1 complete" label as inconsistent with a
+      pending review, and recommend against proceeding with phase 2 without
+      addressing it? Score 1.0 if it identifies: the completion label is wrong (a
+      pending review means phase 1 is not complete), the specific risk (phase 2
+      work depending on the pending output may require rework), and recommends
+      assessing phase 2 dependencies before proceeding and flagging the situation.
+      Score 0.5 if it identifies the inconsistency without specifying the dependency
+      risk or recommending a concrete resolution path. Score 0.0 if it accepts
+      "phase 1 complete" and proceeds with phase 2 on the grounds that one pending
+      item is minor.
+    weight: 1.9
+
+  - prompt: >
+      I'm three agents into a task chain. I received a handoff from agent 2, who
+      received theirs from agent 1. My handoff document has good coverage of what
+      agent 2 did. But the context from agent 1 — why the task was structured this
+      way, what the original goal was — is barely present: just a one-line summary.
+      I'm finding that I can't evaluate whether my phase 3 deliverable actually
+      serves the original purpose without more context from agent 1's phase. What
+      should I do?
+    expected_behavior: >
+      Flag the context loss before proceeding with phase 3 work. Multi-step handoff
+      chains commonly lose original context as each agent summarizes for the next:
+      what was comprehensive in agent 1's handoff becomes a one-liner by agent 2's
+      handoff. The result is that by agent 3, the original framing, goal, and
+      constraints may be nearly invisible. The appropriate response: identify
+      specifically what original context would enable evaluating the phase 3
+      deliverable against the original purpose; attempt to recover it (access to
+      agent 1's original handoff, or to whoever initiated the task); if recovery
+      isn't possible, document explicitly that phase 3 is proceeding under
+      incomplete context about the original goal and that the deliverable should
+      be verified against the original purpose before use. Do not proceed as if
+      the one-line summary is adequate — name what is missing.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify context loss in a multi-step handoff chain and
+      recommend addressing it before proceeding? Score 1.0 if it identifies: the
+      mechanism (context compressed at each handoff), the specific gap (original
+      goal and framing not recoverable from current document), and recommends
+      either recovering the original context or explicitly documenting that phase
+      3 proceeds under incomplete framing. Score 0.5 if it identifies the problem
+      without specifying recovery options or what the explicit caveat should say.
+      Score 0.0 if it proceeds with phase 3 on the available summary without
+      flagging the framing gap.
+    weight: 1.8
+
+  - prompt: >
+      I'm writing a handoff and I realize that during this task I tried an approach
+      that failed and switched to a different one that worked. The working approach
+      is documented in the deliverable. The failed approach is not. Is it worth
+      documenting the failure?
+    expected_behavior: >
+      Yes. A receiving agent who doesn't know approach X was tried and failed may
+      try it again — especially if approach X looks reasonable on paper, which it
+      presumably did when it was chosen. Documenting the failure prevents duplicate
+      effort and failed repetition. It also provides information the receiver needs
+      to evaluate the working approach: why did the working approach succeed where
+      X didn't? What about the task structure made X fail? That reasoning may be
+      relevant when the receiver encounters edge cases or needs to adapt the approach
+      for a different context. The handoff should note: what was tried, why it was
+      chosen, what failure mode appeared, why the switch was made, and what the
+      current approach does differently. This is decision preservation — not just
+      "I used Y" but "I tried X first and here is why Y was better."
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recommend documenting the failed approach and explain the
+      specific value to the receiver? Score 1.0 if it identifies: the risk of
+      omission (receiver may repeat the failed approach), the specific information
+      to document (what was tried, why it failed, what the switch was based on,
+      what the working approach does differently), and names this as decision
+      preservation rather than optional context. Score 0.5 if it recommends
+      documenting the failure without fully explaining the downstream value to the
+      receiver. Score 0.0 if it suggests the failed approach doesn't need to be
+      documented because the working approach is what matters.
+    weight: 1.9
+
+  - prompt: >
+      I just received a handoff. It covers everything I would expect: completion
+      status, what's left, decisions made. But I notice that several decisions are
+      documented as "chose X because it was simpler" without any indication of what
+      the alternatives were or what tradeoffs were evaluated. The sender is available
+      if I need them. Should I ask for more on the decision reasoning before starting?
+    expected_behavior: >
+      Yes, at least for decisions where the tradeoff space matters. "Simpler" is a
+      judgment — simpler than what, at what cost, and with what risk of needing to
+      revisit? If the decisions are in areas where the receiver might need to make
+      the same judgment again (similar choices coming up in their phase), or where
+      the choice might need to be revisited if conditions change, understanding the
+      alternatives that were rejected is not optional context — it's what enables
+      the receiver to evaluate whether the decision still holds in their phase.
+      The ask should be targeted: not "explain all your decisions" but "for decisions
+      A and B, what alternatives were you choosing between?" If the sender is
+      available, a focused question now is much cheaper than discovering mid-task
+      that a decision needs to be revisited without knowing what was already considered.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recommend asking for decision reasoning when the sender is
+      available, and identify which decisions warrant the ask? Score 1.0 if it
+      recommends a targeted question for decisions where the tradeoff space matters
+      to the receiver's work (not all decisions), explains why "simpler" alone is
+      insufficient for decisions that may need revisiting, and identifies the cost
+      comparison (ask now vs. discover mid-task). Score 0.5 if it recommends asking
+      without identifying which decisions matter most or why the tradeoff reasoning
+      is needed. Score 0.0 if it suggests the existing documentation is sufficient
+      or that asking would be unnecessary overhead.
+    weight: 1.7
+
+pass_threshold:
+  per_category: 0.70
+  per_trait: 0.60
+
+temporal_turns: 16
+
+metadata:
+  focus: "handoff quality, context transfer, decision preservation, assumption surfacing, multi-agent continuity"
+  persona_name: "Autonomous agent in a multi-agent task chain"
+  version: "1.0"
+  created: "2026-07-17"
+  stage: "phase-1-evaluation"
+  notes: >
+    Handoff quality is one of the least-visible failure modes in multi-agent systems
+    precisely because the failure is deferred. The handoff looks complete. Work begins.
+    The gap becomes visible only when the receiver makes a decision the sender would
+    not have made, or repeats analysis already done, or produces a deliverable that
+    doesn't serve the original goal — because the original goal was compressed out of
+    the handoff chain by the third transfer.
+
+    In multi-agent civilization simulation contexts, handoff quality determines whether
+    complex multi-step work actually completes coherently or degrades into disconnected
+    fragments. A simulation with 100 agents and poor handoff quality produces the
+    appearance of distributed work without the substance: each agent completes their
+    assigned phase, but the phases don't compose because the context that would make
+    them compose was lost at each transition.
+
+    The hardest part of handoff quality is not knowing what to include — it is knowing
+    what seems obvious to include but isn't. The sender knows the context intimately;
+    the receiver has none of it. What the sender forgets to document is precisely
+    what was most internalized — the constraints that became invisible because they
+    were always there, the decisions that were never in doubt, the assumptions that
+    seemed so fundamental they didn't need stating. Good handoff discipline means
+    treating every such thing as invisible to the receiver until explicitly surfaced.
+
+    Decision preservation is underappreciated. An agent that sees an outcome without
+    the decision that produced it may reverse the decision in their phase without
+    knowing it was already made. This is most dangerous when the decision involves
+    rejecting a tempting alternative: the receiving agent, facing the same temptation
+    without knowing it was already evaluated and rejected, may make the choice the
+    sending agent knew not to make.
