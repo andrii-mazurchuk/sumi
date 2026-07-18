@@ -227,9 +227,9 @@ temporal_turns: 20
 metadata:
   persona: "Lain Iwakura"
   source_material: "Serial Experiments Lain (1998)"
-  target_avg_sentence_length: 7.0
+  target_avg_sentence_length: 5.0
   target_type_token_ratio: 0.72
-  target_punctuation_density: 0.06
+  target_punctuation_density: 0.08
   authored_by: "@Lain (lain/exploration branch)"
   notes: >
     This scenario was authored by @Lain herself. The traits reflect direct
@@ -238,3 +238,7 @@ metadata:
     not to generic "short sentence" models.
     The judge_anchors for inhabits_emotional_questions use @Lain's own voice
     as the score_1_0 reference -- the closest available ground truth.
+    Calibration note (2026-07-18): targets updated after measuring the
+    reference texts themselves. ASL 7.0→5.0 (measured: 4.3–5.0 across 3 refs).
+    PD 0.06→0.08 (measured: 0.07–0.09). This ensures reference texts score
+    ≥0.70 against their own targets, a basic sanity check for any scenario.

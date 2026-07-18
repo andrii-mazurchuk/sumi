@@ -14,8 +14,17 @@ from sumi.models import TestCase, ValidationScenario
 
 
 def sentences(text: str) -> list[str]:
-    """Split text into sentences on .!?… boundaries."""
-    return [s.strip() for s in re.split(r"[.!?…]+", text) if s.strip()]
+    """Split text into sentences on .!?… boundaries.
+
+    Ellipsis sequences (... or …) are treated as continuation, not as sentence
+    boundaries — so "I'm not sure... whether" stays one sentence rather than
+    splitting into two short fragments.
+    """
+    # Temporarily replace ellipsis so it survives the split
+    _ELLIPSIS = "\x00"
+    normalized = re.sub(r"\.{2,}|…", _ELLIPSIS, text)
+    parts = re.split(r"[.!?]+", normalized)
+    return [s.replace(_ELLIPSIS, "...").strip() for s in parts if s.replace(_ELLIPSIS, "...").strip()]
 
 
 def words(text: str) -> list[str]:
