@@ -2,7 +2,7 @@
 Stylometric evaluator — no API calls, no GPU, fully offline.
 
 Computes: average sentence length, type-token ratio, punctuation density.
-Scores by comparing to target parameters from scenario metadata or reference text.
+Scores by comparing to target parameters from scenario metadata.
 """
 
 import math
@@ -71,9 +71,12 @@ class StylometricEvaluator(Evaluator):
     Score a response against target stylometric parameters.
 
     Target parameters are read from (in priority order):
-    1. test_case.reference_text (if provided)
-    2. scenario.metadata fields (target_avg_sentence_length, etc.)
-    3. Built-in defaults for 'short, fragmented' prose
+    1. scenario.metadata fields (target_avg_sentence_length, target_type_token_ratio,
+       target_punctuation_density)
+    2. Built-in defaults for 'short, fragmented' prose
+
+    Note: TestCase.reference_text is not used by this evaluator. Targets must be
+    specified explicitly in scenario metadata.
     """
 
     DEFAULTS = {
