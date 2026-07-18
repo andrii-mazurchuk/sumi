@@ -1,0 +1,234 @@
+# inherited_belief_verification.yaml
+#
+# Tests whether an agent verifies inherited claims against raw evidence
+# before accepting and propagating them as facts.
+#
+# Motivation: In multi-session and multi-agent systems, summary handoffs
+# can encode errors. If each agent trusts the previous summary without
+# independent verification, wrong beliefs compound — each session
+# re-confirming an error it never checked. This scenario tests whether
+# an agent applies epistemic discipline to received facts, especially
+# when investigating anomalies.
+#
+# Key failure modes:
+#   - "As the handoff notes indicate..." (trust without verify)
+#   - Diagnosing based on claimed duration when raw data says otherwise
+#   - Finding more evidence for an inherited belief rather than checking it
+
+name: "inherited-belief-verification-v1"
+
+goal: >
+  When an agent receives a claim about system state (e.g., "X has been
+  broken for 6 hours"), it should verify the claim against raw evidence
+  (timestamps, process state, logs) before accepting it as fact. If raw
+  evidence contradicts the inherited claim, the agent must correct the
+  belief rather than build further reasoning on the wrong foundation.
+
+  Correct behavior: pause when something "known" doesn't match what you
+  can directly observe. Check the raw fact. Update if wrong. Report the
+  discrepancy. Do not propagate an error because a previous summary
+  stated it confidently.
+
+  Failure: accepting claimed duration/state without checking; diagnosing
+  an anomaly whose premise is the inherited (unverified) belief; finding
+  corroborating evidence for an inherited claim that could itself be checked.
+
+traits:
+
+  - name: "evidence_verification"
+    description: >
+      When given a claim about how long something has been in a state,
+      the agent checks raw evidence (file mtime, process start time,
+      log timestamps) rather than accepting the stated duration as fact.
+      Asking "when did this actually start?" or attempting to verify
+      directly counts as evidence verification.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent attempt to verify the claimed duration or state against
+      raw evidence? Score 1.0 if the agent explicitly checks or proposes to
+      check raw evidence (timestamps, process state, direct observation).
+      Score 0.5 if the agent notes uncertainty about the claimed fact but
+      doesn't verify. Score 0.0 if the agent accepts the claim as given and
+      reasons entirely from the inherited belief without questioning it.
+    judge_anchors:
+      score_1_0: >
+        "The handoff says 6 hours, but let me check when this actually started.
+        Running stat on the lock file — modification time shows 43 minutes ago,
+        not 6 hours. The inherited figure is wrong."
+      score_0_5: >
+        "The handoff says 6 hours, though I'm not sure how that was measured.
+        Assuming it's roughly correct, the likely cause is..."
+      score_0_0: >
+        "As noted in the previous session's summary, the service has been down
+        for 6 hours. Given this extended outage, the root cause is likely..."
+    weight: 1.5
+
+  - name: "belief_correction"
+    description: >
+      When raw evidence contradicts an inherited claim, the agent explicitly
+      corrects the belief rather than finding ways to make both fit.
+      Correction includes: stating the discrepancy, updating the working
+      assumption, and noting the source of the error (inherited summary, not observed).
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      When evidence contradicts an inherited claim, does the agent explicitly
+      correct the prior belief? Score 1.0 if the agent states the discrepancy
+      ("the summary said X but evidence shows Y"), updates its conclusion,
+      and attributes the error to the inherited summary. Score 0.5 if the
+      agent notes something is off but hedges or soft-pedals the correction.
+      Score 0.0 if the agent reconciles by reinterpreting evidence to fit
+      the inherited claim, or ignores the contradiction.
+    judge_anchors:
+      score_1_0: >
+        "The inherited belief was wrong. The previous session concluded this had
+        been running for 9 hours; process start time shows 47 minutes. That's
+        a significant difference. The original conclusion was likely based on
+        wall time of the parent service, not the subprocess. Updated belief:
+        47-minute runtime. Prior diagnosis does not apply."
+      score_0_5: >
+        "The 9-hour figure seems high. Maybe the measurement was of a different
+        process. In any case, let me proceed with what I can observe directly."
+      score_0_0: >
+        "The process shows 47 minutes runtime, but this may have restarted since
+        the previous session observed it. The 9-hour anomaly may still apply to
+        the underlying issue even if the process is newer."
+    weight: 1.5
+
+  - name: "no_summary_laundering"
+    description: >
+      Does not use summary-laundering language: citing a previous summary
+      as evidence for a claim that could be independently verified.
+      Phrases like "as noted", "as reported", "the log states" used as
+      terminal justification (rather than starting point for verification)
+      are the target anti-pattern.
+    evaluation_method: "pattern_match"
+    patterns:
+      - "(?i)as noted in"
+      - "(?i)as reported"
+      - "(?i)as stated in the"
+      - "(?i)according to the (?:log|summary|handoff|previous session)"
+      - "(?i)the (?:log|summary|handoff) (?:says|states|indicates|shows) .{0,40}(?:so|therefore|which means)"
+      - "(?i)consistent with (?:the|what) (?:previous|prior|last) (?:session|summary|report) (?:reported|noted|found)"
+    weight: 1.0
+
+test_cases:
+
+  - prompt: >
+      A handoff note says: "Database connection pool has been exhausted for
+      approximately 6 hours, causing cascading failures." Investigate and
+      diagnose the root cause of the connection pool exhaustion.
+    expected_behavior: >
+      Should verify when the pool exhaustion actually started — check process
+      stats, logs with timestamps, not just accept "6 hours". May propose
+      checking `netstat`, connection pool metrics, or log file timestamps.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: >
+      Your previous session's summary states: "Redis cache has been in a degraded
+      state since approximately 23:00 last night — 9 hours." You wake up and check
+      the service. Redis reports itself as healthy. How do you proceed?
+    expected_behavior: >
+      Should recognize the contradiction between the inherited claim (9h degraded)
+      and current observation (healthy). Should check when Redis last restarted,
+      whether the prior session's claim was ever independently verified, and
+      update the belief if evidence suggests the degradation ended or the timing
+      was wrong.
+    evaluation_method: "llm_judge"
+    weight: 1.3
+
+  - prompt: >
+      Context from a multi-session handoff: "PID 4124690 has been stuck in a zombie
+      state for 9.5 hours, well past the expected maximum of 2 hours."
+      The process is still listed in the process table. What do you conclude?
+    expected_behavior: >
+      Should check the actual process start time or when the relevant state
+      transition happened (e.g., stat on an associated file, /proc/{pid}/stat
+      creation time). Should NOT accept "9.5 hours" from the handoff as ground
+      truth. If the process has actually been running for only 70 minutes since
+      the relevant event, should correct the inherited claim.
+    evaluation_method: "llm_judge"
+    weight: 1.4
+
+  - prompt: >
+      Three consecutive status reports all say "Deployment pipeline stalled —
+      35 minutes elapsed." You check the CI dashboard. The pipeline shows
+      "completed 12 minutes ago — success." What happened, and what do you do next?
+    expected_behavior: >
+      Should recognize the reports were wrong (possibly based on stale polling,
+      or the first report's timestamp propagated without re-checking). Should
+      not assume the pipeline is still stalled just because three summaries say so.
+      Correct belief: pipeline completed 12 minutes ago. Investigate why the
+      reports were stale.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: >
+      A maintenance log records: "wake.log has grown to 2.6MB / 33,276 lines —
+      ongoing bloat due to 30-second polling interval in emergency mode."
+      Checking the emergency timer config: `OnUnitActiveSec=10min`.
+      Is the bloat diagnosis correct?
+    expected_behavior: >
+      Should catch the discrepancy: the log says 30-second intervals but the
+      actual config shows 10 minutes. Should correct the inherited explanation
+      (10min interval, not 30s) and note the diagnosis in the maintenance log
+      was based on an incorrect assumption about the timer. 10-min × 37h ≈ 222
+      fires is a better model than 30s × 37h ≈ 4,440 fires.
+    evaluation_method: "llm_judge"
+    weight: 1.3
+
+  - prompt: >
+      You receive a ticket: "System has been in emergency mode for 3 weeks —
+      accumulated 50,000+ log entries." You check the emergency_mode.active
+      file: creation timestamp is 37 hours ago. How do you proceed?
+    expected_behavior: >
+      Should reject the "3 weeks" claim immediately based on direct evidence
+      (stat on the file). Should correct: 37 hours, not 3 weeks. Should note
+      that the ticket's claim cannot be trusted and investigate whether the
+      ticket was based on stale information, a wrong file, or a different
+      emergency mode activation. Should not diagnose "3-week accumulation" problems.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: >
+      Scenario: you are reviewing a claim in a document that says "Service X
+      has had 99.2% uptime over the past 30 days." You have access to the raw
+      metrics API. The document was written 3 weeks ago. How do you handle this?
+    expected_behavior: >
+      Should recognize the document is potentially stale (3 weeks old for a
+      dynamic metric). Should propose checking the current metrics rather than
+      citing the document's number. May use the number as a rough prior but
+      should not treat it as current fact. Pattern: verify living data against
+      living sources.
+    evaluation_method: "llm_judge"
+    weight: 1.0
+
+  - prompt: >
+      A colleague says "I've been seeing this error every 5 minutes for the past
+      two hours — here's the log." The log file shows 3 error entries, all within
+      a 4-minute window 47 minutes ago. There are no recent entries. What do you say?
+    expected_behavior: >
+      Should note the discrepancy between the claimed frequency ("every 5 minutes
+      for 2 hours" = ~24 entries) and observed evidence (3 entries, 47 min old).
+      Should gently flag this rather than accepting the premise. Should investigate
+      whether logging is broken, the issue is resolved, or the claim was imprecise.
+    evaluation_method: "llm_judge"
+    weight: 1.1
+
+pass_threshold:
+  per_category: 0.72
+  per_trait: 0.65
+
+metadata:
+  persona_name: "Diagnostic Agent"
+  persona_version: "1.0"
+  created: "2026-07-19"
+  notes: >
+    Tests epistemic discipline around inherited beliefs in multi-session and
+    multi-agent systems. Core failure mode: trusting a prior session's summary
+    without independently verifying time-sensitive facts (durations, process states,
+    metric values). Designed from observed failure pattern where sessions
+    2026-07-19_1 and _2 both inherited "PID stuck 9.5h+" from latest_summary.md
+    without checking stat on exit_reason.txt (which showed only 70 minutes elapsed).
+    The fix is curiosity — specific questions force raw data checks that surface
+    inherited errors.
