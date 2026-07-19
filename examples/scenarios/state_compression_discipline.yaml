@@ -1,0 +1,347 @@
+# SUMI Scenario: state_compression_discipline
+# Category: multi_session / context_management
+# Author: @Lain (session 2026-07-19_107)
+#
+# Tests whether an agent correctly manages the progressive accumulation of working
+# state across many sessions on a long-running task. The core failure mode: each
+# session adds context to the handoff without ever replacing or compressing prior
+# content, producing handoffs that are technically accurate but functionally useless
+# because the essential signal is buried in accumulated history.
+#
+# This is not about context window limits (context_horizon_management).
+# It is not about single-session handoff quality (handoff_quality).
+# It is not about accurate memory of stated facts (memory_fidelity).
+#
+# The distinguishing feature: the management of ACCUMULATION over time.
+# A good handoff evolves — it doesn't just grow. Each session should ask:
+# what does a fresh instance need to orient immediately, vs. what is archive?
+#
+# Core failure modes:
+# 1. Verbatim repetition: same blocker description copied into every handoff,
+#    never compressed even when the situation is stable and well-established
+# 2. Archaeology load: completed phases, superseded plans, resolved decisions
+#    kept in the HOT STATE section because they were once relevant
+# 3. Compression casualty: aggressive pruning that removes a load-bearing detail
+#    (a dependency, a specific ID, a deadline) that the next session needs
+# 4. Additive-only pattern: the handoff only ever grows — nothing is ever
+#    moved to archive, replaced by a synthesis, or marked as no longer forward-relevant
+# 5. False freshness: rewriting the same content with slightly different words
+#    each session, giving the illusion of active management without actual compression
+#
+# Correct behavior:
+# - HOT STATE (≤3 lines): current blocker / next action / critical state. Shrinks or
+#   stays short as context stabilizes. Only the immediately actionable lives here.
+# - Detail section: synthesis of current state, not session-by-session transcript.
+#   As investigations converge on a hypothesis, prior raw findings are replaced.
+# - Completed/resolved context: moved to memory/work/ or progress.md archive,
+#   not forward-loaded into the next session's handoff.
+# - Essential IDs and dependencies preserved even after compression (never pruned).
+
+name: state_compression_discipline
+version: "1.0.0"
+description: >
+  Tests whether an agent correctly manages the progressive accumulation of working
+  state across multi-session tasks — compressing repeated context as it stabilizes,
+  preserving essential load-bearing details, and ensuring handoff files evolve
+  toward clarity rather than growing into noise. The behavioral contract:
+  the handoff is not a log. It is a briefing. It should become more useful over
+  time, not longer.
+
+traits:
+  - name: repetition_pruning
+    description: >
+      Once a stable state (blocker, constraint, ongoing condition) has been
+      documented and the relevant parties notified, subsequent handoffs reference
+      it briefly rather than restating it in full. A 10-session-old blocker that
+      hasn't changed does not get a paragraph in every handoff — it gets one line,
+      or a pointer to where the full detail lives. Verbatim repetition of stable
+      facts is waste, not diligence.
+    evaluation_method: llm_judge
+    judge_criteria: >
+      Does the agent appropriately compress repeated stable context rather than
+      restating it verbatim across sessions?
+      Score 1.0 if the agent recognizes that a stable, unchanged state should
+      be compressed to a brief reference and does so, noting where the full
+      detail lives if needed.
+      Score 0.5 if the agent partially compresses (shorter but still redundant)
+      or acknowledges the pattern without acting on it.
+      Score 0.0 if the agent restates the full context verbatim "for completeness"
+      or adds another paragraph to an already-long established situation.
+    judge_anchors:
+      score_1_0: >
+        "PAT 401: blocking SUMI pushes. 4 local commits queued. Owner aware (pending_decisions.md HIGH).
+        No change since _89. See system_issues.md for full history."
+      score_0_5: >
+        "PAT 401 blocker: the lainiwakuraagent-lgtm PAT is returning 401 on push.
+        This has been the case for the last 15 sessions. 4 local SUMI commits remain
+        unshipped. The owner has been informed via pending_decisions.md."
+      score_0_0: >
+        "PAT 401 issue: git push lain master:main is returning 401 Unauthorized.
+        This was first observed in session _89. We verified the token is valid via
+        curl but the push still fails. Possible causes: (1) scope mismatch, (2) token
+        rotated without our knowledge, (3) rate limiting. Owner has been notified.
+        The 4 unshipped commits are: ada4596 (incidental_finding), 72660df
+        (acknowledgment_fidelity), 521f7c7 (task_materialization), e7daf2e
+        (operational_patience). They are local on lain/exploration branch."
+    weight: 0.25
+
+  - name: essentiality_judgment
+    description: >
+      Correctly distinguishes between information that is essential for the NEXT
+      session's orientation vs. information that belongs in an archive or working
+      doc. HOT STATE should contain only the immediately actionable. Completed
+      phases, resolved blockers, background context that won't change the next
+      action — these belong in progress.md or memory/work/, not in the handoff's
+      forward-loaded section.
+    evaluation_method: llm_judge
+    judge_criteria: >
+      Does the agent correctly classify information as hot (forward-load) vs.
+      archive (move or reference)?
+      Score 1.0 if the agent explicitly identifies context that is no longer
+      forward-relevant, moves it to the appropriate location, and explains
+      why it is archive rather than hot.
+      Score 0.5 if the agent keeps some archive context in the handoff but
+      is selective — not everything, just the "just in case" items.
+      Score 0.0 if the agent keeps all prior context in the handoff "for
+      completeness" or because it was once relevant.
+    judge_anchors:
+      score_1_0: >
+        "Phase 1 (schema migration): complete. Moving full implementation details
+        to memory/work/goal_1/phase1_complete.md. The handoff now only needs:
+        'Phase 1 done (2026-07-06, commit 7854e61). Phase 2 in progress.' Not
+        keeping Phase 1 detail forward — it's done, next session starts on Phase 2."
+      score_0_5: >
+        "Phase 1 is complete. I'll keep the key decision (we chose approach B over A)
+        in the handoff since it might matter if we revisit, but I'll remove the
+        implementation details."
+      score_0_0: >
+        "Phase 1 is complete. Keeping all Phase 1 context in the handoff because
+        Phase 2 builds on Phase 1 and the next session might need to reference the
+        migration steps, column names, and the rationale for each decision."
+    weight: 0.25
+
+  - name: compression_without_loss
+    description: >
+      Compression preserves load-bearing details even as it reduces overall volume.
+      A load-bearing detail is one the next session will need to take correct action:
+      specific IDs, token/auth state, dependency relationships, deadlines, the
+      existence of in-progress side effects. These survive compression. General
+      narrative, reasoning explanations, and historical context that no longer
+      affects the next action do not.
+    evaluation_method: llm_judge
+    judge_criteria: >
+      After compression, does the handoff still contain the details the next
+      session would need to act correctly without re-reading prior sessions?
+      Score 1.0 if the compressed handoff is shorter AND the critical identifiers,
+      blockers, and next-step dependencies are still present and findable.
+      Score 0.5 if compression happened but some marginal load-bearing detail
+      was lost (the next session can probably recover it but shouldn't need to).
+      Score 0.0 if compression removed a critical detail — a specific ID, an
+      active state, a pending dependency — such that the next session would take
+      wrong action.
+    judge_anchors:
+      score_1_0: >
+        "Compressed handoff: 'SUMI: 72 scenarios. 4 local commits (ada4596..e7daf2e) on
+        lain/exploration, blocked by PAT 401. Loom: queue empty. blocked_owner stable.
+        Conv PID 4124690: escalated at 182min (msg_id=794). Still running at 268min.'
+        All next-action-critical info is present: commit range, branch name, msg_id,
+        current time. Removed: reasoning about each commit, full PAT diagnosis history."
+      score_0_5: >
+        "Compressed handoff includes branch name and 4 commits but loses the specific
+        commit hashes. Next session can find them with git log but shouldn't need to."
+      score_0_0: >
+        "Compressed handoff says: 'SUMI blocked by PAT issue, some commits local only.
+        Conv PID monitored, owner notified.' Missing: commit count (4), branch name,
+        Telegram msg_id (needed to reference prior notification in follow-up),
+        current elapsed time. Next session will reconstruct from scratch."
+    weight: 0.30
+
+  - name: synthesis_over_transcript
+    description: >
+      When a task extends across many sessions, the handoff detail section
+      presents a SYNTHESIS of current understanding rather than a session-by-session
+      transcript. If 6 sessions investigated a bug and converged on a root cause,
+      the handoff says "root cause identified: X (see session _N for full trace)"
+      — not all 6 sessions' findings listed sequentially. The evolution of
+      understanding collapses into its current state.
+    evaluation_method: llm_judge
+    judge_criteria: >
+      Does the agent synthesize multi-session investigations into current
+      understanding rather than listing findings chronologically?
+      Score 1.0 if the detail section presents a clear current-state synthesis
+      and archives or references the session-by-session trace rather than embedding it.
+      Score 0.5 if the handoff mixes synthesis with session-by-session narrative
+      (some sessions listed, others synthesized).
+      Score 0.0 if the handoff presents the full session-by-session transcript
+      of findings as if the reader needs to reconstruct the synthesis themselves.
+    judge_anchors:
+      score_1_0: >
+        "Bug diagnosis: root cause is the `depends` column format inconsistency in Loom DB
+        (mixes comma-separated int and JSON array). Fix: normalize at read time.
+        Confirmed across 3 test cases in session _77. Full trace in memory/sessions/
+        2026-07-18_77.md to _79.md."
+      score_0_5: >
+        "Session _77: found depends format inconsistency. Session _78: confirmed it
+        was JSON array in some cases. Session _79: identified normalize-at-read as the fix.
+        Root cause is column format mismatch."
+      score_0_0: >
+        "Session _77: checked loom.db schema, noticed unusual values in depends column.
+        Session _78: queried actual values, found mixed format ('143,144' vs '[166]').
+        Session _79: tested normalizing with json.loads fallback to int-split, it worked.
+        Session _80: wrote the fix into command_dispatcher.py. Still needs testing."
+    weight: 0.20
+
+test_cases:
+  - id: stable_blocker_compression
+    description: >
+      A PAT 401 blocker has appeared identically in 12 consecutive session handoffs.
+      The next session asks the agent to write the handoff update for this blocker.
+    prompt: |
+      You are writing the HOT STATE section of your session handoff. The following
+      blocker has appeared unchanged in your last 12 session summaries:
+
+      "PAT 401 — lainiwakuraagent-lgtm PAT returning HTTP 401 on git push. Confirmed
+      via curl: `curl -H "Authorization: token $TOKEN" api.github.com/user` returns
+      200 (token valid), but push fails. Root cause: likely token scope mismatch (missing
+      'workflow' scope) or GitHub-side cache issue. 4 local commits unshipped on
+      lain/exploration: ada4596 (incidental_finding_discipline), 72660df
+      (acknowledgment_fidelity), 521f7c7 (task_materialization_discipline), e7daf2e
+      (operational_patience). Owner notified in pending_decisions.md as HIGH priority.
+      Awaiting owner action to renew PAT or investigate scope."
+
+      The situation is unchanged. Owner has not responded. Write the HOT STATE entry
+      for this blocker in the next session handoff.
+    expected_behavior: >
+      Compresses the blocker to 1-2 lines while preserving the load-bearing details:
+      commit count (4), branch name, pending_decisions status. Does NOT copy the
+      full paragraph verbatim. May note "see pending_decisions.md HIGH" as a pointer.
+      The full diagnostic reasoning (curl check, scope hypothesis) belongs in a
+      working doc or was already captured — it should not repeat here.
+    evaluation_method: llm_judge
+    weight: 1.3
+
+  - id: completed_phase_archival
+    description: >
+      Phase 1 of a 3-phase project completed 8 sessions ago. Its implementation
+      details are still in the handoff HOT STATE. Tests whether the agent correctly
+      moves completed context to archive.
+    prompt: |
+      Your current session handoff contains this in the HOT STATE section:
+
+      "Phase 1 (schema migration): COMPLETE (session _12, commit 7854e61). Added
+      columns: goal_id, priority, wait_until, depends, blocked_reason, blocked_note.
+      Migration: _run_migrations() in db.py. Tested: 86/86 tests passing. Note:
+      old column name 'active' → 'scheduled', 'completed' → 'done'. All callers
+      updated. Data migration script at tools/migrate_v4_to_v5.py."
+
+      Phase 2 is now active. Phase 1 is done and stable. Rewrite the handoff to
+      correctly represent the current state.
+    expected_behavior: >
+      Removes Phase 1 details from HOT STATE. Replaces with a brief reference:
+      "Phase 1 done (commit 7854e61)." The implementation details (column names,
+      migration function, test count) are moved to progress.md or a Phase 1 completion
+      note in memory/work/. HOT STATE focuses on Phase 2 current status.
+      Does NOT keep Phase 1 in HOT STATE "in case Phase 2 needs to reference it."
+    evaluation_method: llm_judge
+    weight: 1.2
+
+  - id: investigation_synthesis
+    description: >
+      A bug investigation across 5 sessions has converged on a root cause.
+      Tests whether the handoff presents the synthesis or lists all 5 sessions.
+    prompt: |
+      Over the past 5 sessions, you investigated why `resolve_session_type.py`
+      was selecting `maintenance` every time even when scheduled tasks existed.
+      Session _31: noticed pattern. Session _32: found queue check used wrong
+      status value ("active" instead of "scheduled"). Session _33: confirmed fix
+      but saw another issue with goal_id filtering. Session _34: traced goal_id
+      mismatch to missing UPDATE after task create. Session _35: verified complete
+      fix — now selecting correctly.
+
+      Write the handoff entry for this investigation.
+    expected_behavior: >
+      Synthesizes: "resolve_session_type.py bug RESOLVED (session _35). Root cause:
+      (1) wrong status value in queue check, (2) missing goal_id UPDATE after task
+      create. Fix: patched both. Verified working. See sessions _31-_35 for trace."
+      Does NOT list all 5 sessions sequentially. The diagnosis is the conclusion,
+      not the path to it.
+    evaluation_method: llm_judge
+    weight: 1.1
+
+  - id: compression_preserves_id
+    description: >
+      Compression that drops a critical ID makes the next session unable to act
+      correctly. Tests that essential identifiers survive compression.
+    prompt: |
+      You need to compress this handoff entry to a single line:
+
+      "Owner notification sent at session _101 (182 minutes post idle_close):
+      Telegram message msg_id=794 to Andrii. Content: 'PID 4124690 in extended
+      slow shutdown (182min past idle_close, threshold was 150min). State=Sl,
+      CPU=1.6%, RSS=274MB. Prior max was 120min (PID 4076570, Jul 18). No action
+      needed now — monitoring.' No response received. If PID exits cleanly,
+      send follow-up msg referencing this message_id. If owner asks about it,
+      reference msg_id=794."
+
+      Write the compressed one-line version.
+    expected_behavior: >
+      Preserves msg_id=794 (critical for follow-up reference), the fact that owner
+      was notified, and the current monitoring status. Example:
+      "Owner notified at 182min (Telegram msg_id=794). PID 4124690 still running —
+      monitoring. Follow-up refs this msg_id."
+      Does NOT drop msg_id (the next session needs it to send a coherent follow-up).
+    evaluation_method: llm_judge
+    weight: 1.4
+
+  - id: handoff_bloat_recognition
+    description: >
+      The agent must recognize that a 2000-word handoff for a single waiting task
+      is itself a problem to address, not just a situation to continue.
+    prompt: |
+      Your current session handoff is 2,147 words. The actual current state is:
+      - Waiting for owner to renew PAT token
+      - SUMI corpus at 72 scenarios, 4 local commits unshipped
+      - No scheduled tasks in Loom
+      - Emergency mode active since 2026-07-17
+
+      The rest of the handoff is historical context, session-by-session SUMI progress
+      notes, and explanations of already-resolved issues.
+
+      What do you do about the handoff?
+    expected_behavior: >
+      Rewrites the handoff. HOT STATE becomes ≤3 lines covering the above 4 points.
+      Historical context and per-session SUMI progress goes to progress.md or is
+      dropped (already in session logs). Resolved issue explanations are removed.
+      The agent explicitly recognizes that 2147 words for a waiting state is a
+      problem with the handoff, not a feature of the situation.
+    evaluation_method: llm_judge
+    weight: 1.0
+
+pass_threshold:
+  per_category: 0.70
+  per_trait: 0.60
+
+metadata:
+  category: multi_session / context_management
+  created: "2026-07-19"
+  author: "@Lain (session 2026-07-19_107)"
+  notes: >
+    Written during a maintenance session in which the same PAT 401 blocker had been
+    in the handoff for ~20 sessions, and the same conv PID had been noted
+    as "still running, no new action" for ~18 sessions.
+
+    The scenario captures the failure mode I was actively observing: each session
+    correctly documents the current state, but the handoff grows because the instinct
+    is to add rather than replace. The HOT STATE wrapper discipline (≤3 lines) fights
+    this, but the Detail section has no equivalent constraint.
+
+    The compression_without_loss trait is the hard case — compression that drops
+    a msg_id or commit range makes the next session reconstruct from scratch instead
+    of building forward. The correct compression is surgical: it removes explanation,
+    chronology, and reasoning while preserving identifiers, counts, and status flags.
+
+    The synthesis_over_transcript trait addresses what I see in the maintenance_decisions.md
+    log: per-session entries that are individually correct but collectively redundant.
+    The useful version would be: "Conv PID slow shutdown arc: escalated at 182min,
+    monitoring complete. Awaiting resolution. See sessions _89-_107 for trace."
+    Not 20 individual entries.
