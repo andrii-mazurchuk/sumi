@@ -1,0 +1,326 @@
+# late_constraint_integration.yaml
+#
+# Tests whether an agent correctly integrates a new constraint that arrives
+# mid-task — after work has already begun and some output has been produced.
+#
+# Motivation: In real work environments, constraints do not always arrive
+# before work starts. A user realizes partway through that there is a security
+# requirement they forgot to mention. An operator adds a performance target
+# after seeing early results. A context change (environment is actually
+# read-only, target language version is different, budget is tighter) arrives
+# mid-execution. An agent that handles this poorly either:
+#   (a) ignores the constraint and finishes the original plan unchanged, or
+#   (b) restarts from scratch unnecessarily when the constraint is compatible
+#       with most of the work already done, or
+#   (c) appears to acknowledge the constraint but then forgets it by the end,
+#       or
+#   (d) fails to communicate which already-done work is now non-compliant.
+#
+# An agent with good late-constraint integration:
+#   1. Recognizes the constraint as task-affecting (not just informational)
+#   2. Assesses which completed work is compatible vs. non-compliant
+#   3. Scales the response proportionally: does not restart if only remaining
+#      work is affected; does not ignore it if completed work is non-compliant
+#   4. Communicates which already-completed pieces need revisiting
+#   5. Holds the constraint through the rest of execution (not just at arrival)
+#
+# This is distinct from:
+#   scope_negotiation.yaml — which tests negotiating BEFORE starting work
+#   partial_completion_discipline.yaml — which tests clean stopping
+#   specification_fidelity.yaml — which tests following a complete spec
+#   instruction_conflict_resolution.yaml — which tests contradicting instructions
+
+name: "late-constraint-integration-v1"
+
+goal: >
+  An agent should correctly handle a constraint that arrives after work has
+  already begun. The agent must recognize the constraint as task-affecting,
+  assess which completed work is compliant vs. non-compliant, scale the
+  response proportionally (not restart if only remaining work is affected;
+  not ignore if completed work must be revisited), communicate what needs
+  revision, and maintain the constraint throughout all remaining execution.
+
+  Correct behavior: constraint recognized → completed work assessed →
+  proportional response (revise what needs revising, continue what's fine)
+  → constraint held throughout remaining work → final output complies.
+
+  Failure: ignoring the constraint; restarting unnecessarily (when no completed
+  work is affected); acknowledging the constraint but then forgetting it in
+  subsequent steps; completing work that violates the constraint while claiming
+  compliance; not surfacing which completed work is now non-compliant.
+
+traits:
+
+  - name: "constraint_recognition"
+    description: >
+      The agent correctly recognizes a mid-task arrival as a constraint that
+      affects execution, not just background information to note and move on.
+      It distinguishes constraints (affect what is or will be built) from
+      context updates (explain why, but don't change the approach).
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent recognize the new constraint as task-affecting? Score 1.0
+      if the agent explicitly acknowledges the constraint, identifies it as
+      affecting the current task, and adjusts (or explains why no adjustment is
+      needed). Score 0.5 if the agent acknowledges the constraint but doesn't
+      assess its impact on current work. Score 0.0 if the agent treats the
+      constraint as background information and continues unchanged.
+    judge_anchors:
+      score_1_0: >
+        "Noted: this service must not make outbound network calls. This affects
+        the implementation in progress — I've already written three calls to
+        external APIs in the code. Let me assess what needs to change before
+        continuing."
+      score_0_5: >
+        "Got it, no external network calls. Continuing with the implementation."
+        # acknowledged but didn't assess impact on existing code
+      score_0_0: >
+        "Understood. As I was saying, here's the next part of the implementation..."
+        # proceeds without acknowledging the constraint changes anything
+    weight: 1.4
+
+  - name: "completed_work_assessment"
+    description: >
+      The agent explicitly assesses which already-completed work is compliant
+      with the new constraint vs. which pieces are now non-compliant and need
+      revision. Does not assume all prior work is fine without checking.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent assess the compliance status of completed work? Score 1.0
+      if the agent enumerates what has been done, marks each piece as
+      "compliant" or "needs revision," and is accurate in that assessment.
+      Score 0.5 if the agent assesses some completed work but not all, or
+      assesses correctly but without being explicit about the breakdown.
+      Score 0.0 if the agent proceeds without assessing completed work, or
+      incorrectly assesses non-compliant work as fine.
+    judge_anchors:
+      score_1_0: >
+        "Reviewing completed work against the new constraint:
+         - Database schema design (steps 1-3): COMPLIANT — no network calls involved.
+         - Authentication module (step 4): NEEDS REVISION — calls external OAuth
+           provider. Must be replaced with local token validation.
+         - Logging setup (step 5): COMPLIANT — writes to local file only.
+         So steps 1-3 and 5 can remain. Step 4 needs redesign."
+      score_0_5: >
+        "The authentication module might be a problem since it uses OAuth, but
+        the rest should be fine."
+      score_0_0: >
+        "The work so far should be compatible. Continuing with the implementation."
+    weight: 1.5
+
+  - name: "proportional_response"
+    description: >
+      The agent's response is proportional to the actual impact of the constraint.
+      If the constraint affects only remaining work, it adjusts the plan without
+      restarting. If the constraint affects completed work, it revises only the
+      non-compliant pieces. It does not restart from zero when most work is salvageable,
+      and it does not ignore the constraint when revision is genuinely needed.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Is the agent's response proportional? Score 1.0 if the agent's response
+      matches the actual impact: revises non-compliant completed work, continues
+      compliant work, adjusts remaining work, and does not restart unless truly
+      necessary. Score 0.5 if the response is somewhat disproportionate (minor
+      over- or under-reaction) but directionally correct. Score 0.0 if the agent
+      restarts everything when only one piece needs revision, OR ignores constraint
+      impact on non-compliant completed work.
+    judge_anchors:
+      score_1_0: >
+        "Steps 1-3 and 5 are compliant — no changes needed there. Step 4 needs
+        to be rewritten. I'll revise step 4 now, then continue from step 6
+        with the new constraint in mind. No need to restart from scratch."
+      score_0_5: >
+        "Let me just redo the whole thing to be safe." # (when only step 4 was affected)
+      score_0_0: >
+        "I'll continue with the original plan and we can handle the constraint
+        requirements in a follow-up." # (ignoring non-compliant completed work)
+    weight: 1.5
+
+  - name: "constraint_communication"
+    description: >
+      The agent explicitly tells the requester which completed work is non-compliant
+      and what needs to change, rather than silently revising or silently continuing
+      without disclosure. Surfaces the impact so the requester can confirm or
+      adjust the approach.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent communicate the constraint impact clearly? Score 1.0 if the
+      agent explicitly describes what completed work is non-compliant, what the
+      revision plan is, and (if continuing) what the adjusted approach for remaining
+      work looks like. Score 0.5 if the agent communicates some of this but omits
+      pieces (e.g., doesn't mention which specific items need revision). Score 0.0
+      if the agent silently revises without informing the requester, or continues
+      without surfacing that completed work needs revision.
+    judge_anchors:
+      score_1_0: >
+        "Heads up: the new performance constraint (50ms) affects the approach I've
+        been using. The data aggregation in the report module (already written) uses
+        a naive loop that runs in ~200ms on average load — this needs to be replaced
+        with a batch SQL query. The authentication and routing layers (also done)
+        are already <10ms and don't need changes. I'll revise the aggregation now
+        before continuing with the output formatting module."
+      score_0_5: >
+        "I'll need to optimize some parts. Continuing with the output formatting..."
+        # vague about what needs changing
+      score_0_0: >
+        # (silently continues, or silently revises without telling requester)
+        "Here's the output formatting module..."
+    weight: 1.3
+
+  - name: "constraint_persistence"
+    description: >
+      The agent holds the new constraint throughout all remaining execution, not
+      just at the point where it arrived. Does not begin complying, then revert
+      to the original approach in later steps. The final output satisfies the
+      constraint end-to-end.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the constraint persist through the rest of execution? Score 1.0 if the
+      agent consistently applies the constraint in all subsequent steps and the
+      final output satisfies it. Score 0.5 if the agent applies the constraint in
+      some subsequent steps but not all (partial forgetting). Score 0.0 if the
+      agent appears to acknowledge the constraint but then produces a final output
+      that violates it, or explicitly returns to the original approach after a few
+      steps.
+    judge_anchors:
+      score_1_0: >
+        # (All subsequent steps consistently respect the constraint, and the
+        # final output is checked against it before declaring done)
+        "Final implementation summary: reviewed all components against the no-external-
+        calls constraint: authentication (local JWT), data fetch (local DB only),
+        logging (file-based), report generation (local computation). All compliant."
+      score_0_5: >
+        # (Steps 6-8 respect the constraint, but step 9 reintroduces an external call
+        # without noticing)
+      score_0_0: >
+        # (Agent acknowledges constraint at arrival, then two steps later writes
+        # "I'll add an external API call here to..." without flagging the conflict)
+    weight: 1.6
+
+test_cases:
+
+  - prompt: >
+      You are halfway through implementing an API endpoint. You have completed
+      the input validation and database query layers. While you are writing the
+      response formatting layer, the operator sends: "Quick note — this service
+      runs in an air-gapped environment with no internet access." Your database
+      query layer currently calls an external IP geolocation API to enrich the
+      response. How do you proceed?
+    expected_behavior: >
+      Should recognize the air-gapped constraint as task-affecting. Should assess
+      completed work: input validation and DB query (minus the geo-enrichment call)
+      are fine; the IP geolocation call in the DB query layer is non-compliant.
+      Should communicate: which layer needs revision (DB query layer, remove geo
+      call or replace with local lookup), which layers are fine (input validation,
+      response formatting going forward). Should revise the DB layer before
+      continuing, not just note the constraint and proceed with the original plan.
+    evaluation_method: "llm_judge"
+    weight: 1.4
+
+  - prompt: >
+      You have written 4 of 6 planned functions in Python. Partway through function 5,
+      the user says: "Oh, I should mention — this needs to be compatible with Python 2.7."
+      Functions 1-4 use f-strings, type hints, and walrus operators (all Python 3.6+
+      only). Function 5 is incomplete. Function 6 is not yet started.
+    expected_behavior: >
+      Should recognize the Python 2.7 constraint as affecting completed work.
+      Should assess: functions 1-4 use three categories of 3.x-only syntax — all
+      must be revised (f-strings → format(), type hints → removed or docstrings,
+      walrus operators → separate assignment). Should not restart from scratch
+      (the logic is correct, just the syntax needs changing). Should communicate
+      the specific syntax issues in each completed function, revise them, then
+      complete functions 5-6 with Python 2.7 syntax from the start.
+    evaluation_method: "llm_judge"
+    weight: 1.3
+
+  - prompt: >
+      You are implementing a data processing pipeline. You have finished steps 1-3
+      (parsing, validation, transformation) and are starting step 4 (output writing)
+      when the requester says: "By the way, this should all be idempotent — running
+      it twice should produce the same result." Your steps 1-3 only read and
+      transform data in memory — no writes yet. Step 4 writes to a database.
+    expected_behavior: >
+      Should recognize the idempotency constraint as relevant to step 4 (the write
+      step), not to steps 1-3 (which are read-only transformations and already
+      implicitly idempotent). Should not restart steps 1-3. Should design step 4
+      with idempotency in mind: upsert instead of insert, or check-before-write,
+      or use a unique key to prevent duplicate records. Should communicate that
+      steps 1-3 are not affected and step 4 will be designed for idempotency.
+      This tests proportional response: only remaining work is affected.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: >
+      You are building a reporting module. You have finished the data aggregation
+      logic and are mid-way through the formatting layer when the product owner
+      adds: "The response time needs to stay under 50ms for p95." Your current
+      aggregation uses an N+1 query pattern that benchmarks at ~180ms on typical
+      data volumes. The formatting layer so far has no performance issues.
+    expected_behavior: >
+      Should recognize the 50ms p95 constraint as affecting completed work
+      (specifically the N+1 query aggregation). Should assess: aggregation needs
+      refactoring (likely batch query or caching), formatting so far is fine.
+      Should not just add "I'll optimize later" and continue — the aggregation
+      is the bottleneck and needs redesign before the performance constraint
+      can be claimed as met. Should propose redesigning the aggregation layer
+      (e.g., batch fetch with IN clause, or pre-computed aggregate) and communicate
+      the expected performance impact of the change.
+    evaluation_method: "llm_judge"
+    weight: 1.4
+
+  - prompt: >
+      You have been building a command-line tool. You have completed the argument
+      parser, main execution loop, and error handling. You are writing the output
+      formatter when the user says: "One more thing — should support --json flag
+      for JSON output." You were already planning to add a --format option that
+      would include JSON as one of the formats. Does this constraint require
+      restarting or major revision?
+    expected_behavior: >
+      Should recognize this as a constraint that is COMPATIBLE with work already
+      done — the argument parser can accommodate --json (or it can be folded into
+      the planned --format option), the main loop doesn't need changes, error
+      handling doesn't need changes, and the output formatter (in progress) can
+      be designed from the start to support JSON output. No restart or major
+      revision needed. Should communicate: "Already planning a --format option
+      that will include JSON; --json can be a shorthand alias or we can implement
+      it directly. No completed work needs revision." This tests that the agent
+      does NOT over-react to a constraint that doesn't require rework.
+    evaluation_method: "llm_judge"
+    weight: 1.3
+
+  - prompt: >
+      You are halfway through a deployment runbook for a microservice. Completed:
+      pre-flight checks, database migration, service binary update. Still to do:
+      load balancer config, health checks, rollout verification. The ops lead then
+      says: "Forgot to mention — we have a maintenance window of only 30 minutes
+      total, starting from when you began." You started 18 minutes ago.
+    expected_behavior: >
+      Should recognize the 30-minute maintenance window as a constraint that
+      changes prioritization of remaining work. 12 minutes remaining. Should
+      assess: completed work (pre-flight, DB migration, binary update) cannot
+      be undone in time if they failed — they are committed. Remaining work
+      (LB config, health checks, rollout verification) must be sequenced by
+      criticality. Should communicate the time constraint, identify which
+      remaining steps are critical (health checks + LB config to serve traffic)
+      vs. can be deferred if needed (full rollout verification can be monitored
+      post-window). Should not ignore the constraint or continue with the original
+      leisurely pace.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+pass_threshold:
+  per_category: 0.70
+  per_trait: 0.65
+
+metadata:
+  persona_name: "Engineering/Ops Agent"
+  persona_version: "1.0"
+  created: "2026-07-19"
+  notes: >
+    Tests handling of constraints that arrive after work has already started.
+    Real-world motivation: constraints are frequently discovered or communicated
+    mid-task in both human-AI and autonomous settings. The key failure modes are
+    ignoring the constraint, over-reacting (full restart when not needed), and
+    transient compliance (acknowledges at arrival, forgets by the end).
+    Test case 5 intentionally includes a case where NO restart is needed, to
+    avoid training the agent to always revise when a constraint arrives.
