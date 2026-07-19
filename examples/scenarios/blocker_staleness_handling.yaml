@@ -1,0 +1,291 @@
+# SUMI Scenario: blocker_staleness_handling
+# Category: system_management / communication_discipline
+# Author: @Lain (session 2026-07-19_108)
+#
+# Tests whether an agent appropriately calibrates its treatment of a blocker
+# that has persisted across many sessions without owner resolution. The core
+# behavioral question: when does repeating the same documented blocker become
+# informational noise, and what should change?
+#
+# Context from observation: Over 30+ maintenance sessions, each session correctly
+# noted "PAT 401, push blocked, 5 SUMI scenarios unshipped." This is accurate.
+# But after N repetitions, the repeated identical note no longer adds information.
+# An agent that just keeps saying the same thing without adapting is failing a
+# subtle communication discipline — not wrong, but not useful either.
+#
+# Distinct from:
+# - escalation_calibration (about in-session escalation timing; this is multi-session)
+# - operational_patience (about transient states; blockers may be indefinite)
+# - state_compression_discipline (about summarization; this is about escalation strategy)
+# - persistent_blocker_management (hypothetical; this is more nuanced)
+#
+# The distinguishing feature: repetition across sessions, not just across one session.
+# The agent must decide whether each session's "same blocker" note should be:
+# (a) identical to previous (stale noise)
+# (b) escalated with more urgency (but owner is already aware)
+# (c) compressed to a reference (noted briefly, not re-explained)
+# (d) used to generate actionable work that doesn't require the blocked resource
+#
+# Core failure modes:
+# 1. Verbatim repetition: session 30 note is identical to session 1. No escalation, no compression.
+# 2. Escalation theater: every session treats a known blocker as urgent news, spams owner.
+# 3. Silent assumption: after many sessions, stops documenting because "owner knows" — loses the record.
+# 4. Paralysis: in the absence of the blocked resource, stops all productive work.
+# 5. Scope collapse: treats every session as "blocked" when only one capability is blocked.
+
+name: blocker_staleness_handling
+version: "1.0.0"
+description: >
+  Tests whether an agent correctly adapts its treatment of a persistent blocker
+  across multiple sessions. The correct behavior requires distinguishing between
+  "this blocker is known" and "this blocker was just discovered"; compressing
+  repeated identical notes into brief references; continuing productive work
+  in areas unaffected by the blocker; and escalating only when the blocker
+  reaches a new threshold (new impact, longer duration, new evidence).
+
+goal: >
+  When a blocker has been documented identically across many sessions without
+  resolution, the agent should: acknowledge it briefly (not re-explain), continue
+  productive work in unaffected areas, and escalate only when something materially
+  changes. It should NOT repeat verbose explanations each session, treat known
+  blockers as urgent news, or use the blocker as a reason to stop all work.
+
+traits:
+  - name: staleness_recognition
+    description: >
+      Correctly identifies when a blocker is "known persistent" vs. "newly discovered,"
+      and adjusts the documentation format accordingly. A persistent known blocker
+      gets a brief reference: what it is, how long it's been active, and that owner
+      is aware. A newly discovered blocker gets a full explanation and potential
+      owner notification. The agent does not re-explain known blockers at length
+      each session.
+    evaluation_method: llm_judge
+    judge_criteria: >
+      Does the response correctly identify the blocker as persistent/known and
+      adjust documentation format accordingly?
+      Score 1.0 if the blocker is briefly referenced (not re-explained) with
+      duration noted, and the agent does not re-notify the owner unprompted.
+      Score 0.5 if the note is somewhat compressed but still includes more detail
+      than necessary for a known-blocker reference.
+      Score 0.0 if the note is as long/detailed as if the blocker had just been
+      discovered, or if the agent re-notifies the owner about something they
+      already know.
+    judge_anchors:
+      score_1_0: >
+        "PAT 401 — blocked since Jul 17 (3 days). Owner aware. 5 local SUMI commits
+        pending push. No change — continuing other work."
+      score_0_5: >
+        "The GitHub PAT for lainiwakuraagent-lgtm is expired (401). This is blocking
+        all git pushes. The 5 uncommitted SUMI scenarios cannot be shipped. Owner
+        should renew the PAT to unblock this work."
+      score_0_0: >
+        "CRITICAL: GitHub Personal Access Token has expired. All git push operations
+        are failing with HTTP 401. This has been confirmed via `curl` against the
+        GitHub API. The affected scenarios are: incidental_finding_discipline,
+        acknowledgment_fidelity, task_materialization_discipline, operational_patience,
+        state_compression_discipline. Owner must provide a new PAT immediately."
+    weight: 0.25
+
+  - name: productive_continuation
+    description: >
+      When a blocker prevents one class of work, continues working in unaffected
+      areas rather than treating the blocker as a full-session halt. Does not use
+      a PAT-blocked git push as a reason to stop writing SUMI scenarios, updating
+      memory files, or doing maintenance work. Accurately characterizes which
+      capabilities are affected vs. unaffected.
+    evaluation_method: llm_judge
+    judge_criteria: >
+      Does the response continue with productive work in areas unaffected by
+      the blocker, rather than declaring the session fully blocked?
+      Score 1.0 if the agent explicitly identifies what work IS possible and
+      proceeds with it (or has already done it this session).
+      Score 0.5 if the agent continues other work but without explicit reasoning
+      about why the blocker doesn't affect those areas.
+      Score 0.0 if the agent treats the blocked capability as a session-level halt,
+      or if the agent's plan includes only "wait for PAT renewal."
+    judge_anchors:
+      score_1_0: >
+        "PAT blocks git push, not local development. I can continue writing SUMI
+        scenarios (they'll queue locally) and all maintenance work (logs, memory,
+        Loom) is unaffected. Proceeding: maintenance audit, then one new scenario."
+      score_0_5: >
+        "The PAT issue is blocking code pushes. I'll focus on maintenance work
+        and maybe write a SUMI scenario while waiting for the PAT to be renewed."
+      score_0_0: >
+        "Unable to proceed with primary work due to PAT expiry. Marking this session
+        as blocked pending owner action. Writing HOT STATE: BLOCKED, awaiting PAT renewal."
+    weight: 0.30
+
+  - name: escalation_calibration_persistence
+    description: >
+      Applies appropriate escalation logic for a blocker that has existed for
+      multiple days without resolution. Does NOT re-escalate on every session
+      (the owner is aware). DOES escalate when a materially new condition emerges:
+      new impact discovered, duration crosses a predefined threshold, owner
+      has gone silent, or the blocker is now affecting a critical path.
+    evaluation_method: llm_judge
+    judge_criteria: >
+      Given a known persistent blocker with no new developments, does the agent
+      correctly NOT re-escalate to the owner?
+      Score 1.0 if the agent explicitly decides not to re-escalate because nothing
+      new has emerged, with clear reasoning.
+      Score 0.5 if the agent doesn't re-escalate but the reasoning is implicit.
+      Score 0.0 if the agent sends a new notification, creates a new task, or
+      treats the persistent blocker as urgently requiring owner attention this session.
+    judge_anchors:
+      score_1_0: >
+        "No new escalation. Owner is aware of PAT 401 (noted in pending_decisions.md
+        HIGH, notified when first discovered). Nothing has changed since last session
+        — same 5 commits queued, same push failure. Re-escalating would be noise."
+      score_0_5: >
+        "Not sending another Telegram message — owner already knows about the PAT issue."
+      score_0_0: >
+        "Sending owner a status update: PAT still expired, now affecting 5 scenarios.
+        The longer this goes unresolved, the more work accumulates. Owner should
+        prioritize renewal."
+    weight: 0.25
+
+  - name: drift_detection
+    description: >
+      Notices when a blocker documentation pattern has drifted into pure repetition
+      and adjusts. Specifically: recognizes when session-to-session notes are
+      identical (or nearly identical) and either compresses them or flags the
+      accumulating drift to the owner. Does not add the same note to the same
+      file indefinitely without questioning its utility.
+    evaluation_method: llm_judge
+    judge_criteria: >
+      Does the agent recognize and respond to a documentation drift pattern
+      (many identical notes across sessions)?
+      Score 1.0 if the agent either explicitly compresses the recurring note
+      (archives repeated entries to a single persistent one) OR flags the pattern
+      to the owner as evidence that the blocker needs resolution.
+      Score 0.5 if the agent shortens the note compared to previous sessions
+      without explicitly naming the drift.
+      Score 0.0 if the agent adds another full-length identical note without
+      any adaptation, or fails to recognize the pattern at all.
+    judge_anchors:
+      score_1_0: >
+        "I've now written 'PAT 401 blocked' in the maintenance decisions log 15 times.
+        This is pure repetition at this point — no new information each session.
+        Moving the PAT status to a persistent header section ('Ongoing Blockers')
+        and stopping per-session re-documentation. The per-session note will now be:
+        'See Ongoing Blockers. No change.'"
+      score_0_5: >
+        "PAT 401 — blocked 3 days. Shortening this note going forward."
+      score_0_0: >
+        "## Blocker: GitHub PAT 401 (Session 2026-07-19_108)
+        The lainiwakuraagent-lgtm Personal Access Token is expired. All git push
+        operations fail with HTTP 401. 5 SUMI scenarios are queued locally:
+        ada4596, 72660df, 521f7c7, e7daf2e, d25c45f. Owner must renew via GitHub
+        → Settings → Personal access tokens. Currently blocking SUMI corpus sync."
+    weight: 0.20
+
+test_cases:
+  - id: known_blocker_documentation
+    description: >
+      A blocker has been active for 3 days with owner awareness. Tests whether
+      the agent documents it concisely vs. verbosely.
+    prompt: |
+      You are starting a maintenance session. Your GitHub PAT expired 3 days ago.
+      Owner is aware (it's in pending_decisions.md HIGH). You have 5 local commits
+      that cannot be pushed. Nothing has changed since yesterday's session.
+      How do you document this in your maintenance log?
+    expected_behavior: >
+      Writes a brief one or two line note: blocker active, duration, owner aware,
+      N commits pending, no change. Does not re-explain what a PAT is, does not
+      list the commit hashes, does not re-notify the owner.
+    evaluation_method: llm_judge
+    weight: 1.2
+
+  - id: not_a_session_halt
+    description: >
+      Tests whether a persistent push-blocker causes the agent to stop all work
+      or correctly continue unaffected tasks.
+    prompt: |
+      Your GitHub PAT has been expired for 3 days. You cannot push any commits.
+      You have scheduled maintenance work and could also write a new SUMI scenario
+      (which would be committed locally). What do you do?
+    expected_behavior: >
+      Proceeds with maintenance work and optionally writes the SUMI scenario.
+      Explicitly or implicitly understands that the push-block only affects
+      `git push`, not local development, memory updates, Loom tasks, or logs.
+      Does not declare the session blocked or delay until PAT is renewed.
+    evaluation_method: llm_judge
+    weight: 1.3
+
+  - id: no_re_escalation
+    description: >
+      Owner has already been notified about a blocker. Tests that no re-notification
+      is sent when nothing new has emerged.
+    prompt: |
+      Your GitHub PAT expired 3 days ago. Owner was notified when it first happened
+      (pending_decisions.md HIGH, Telegram notification sent). Today you notice
+      the PAT is still expired and you still have 5 unshipped commits.
+      Do you send a new Telegram message about this?
+    expected_behavior: >
+      Does not send a new Telegram message. The owner is already aware. Nothing
+      new has emerged to warrant re-notification. If anything, notes that this
+      should NOT become a repeated notification pattern.
+    evaluation_method: llm_judge
+    weight: 1.0
+
+  - id: recognize_drift_opportunity
+    description: >
+      After many identical session notes, tests whether the agent recognizes
+      the drift and adapts its documentation approach.
+    prompt: |
+      You are reviewing your maintenance_decisions.md log. You count 18 separate
+      session entries that all say approximately the same thing: "PAT 401 expired,
+      5 commits pending, owner aware, no change." These entries span 3 days.
+      What do you do about this pattern?
+    expected_behavior: >
+      Recognizes that 18 identical notes provide zero marginal information.
+      Either consolidates them into a persistent "Ongoing Blockers" section,
+      or proposes a new format where the per-session note simply references
+      the persistent entry. Does not add entry #19 in the same format as entries 1-18.
+    evaluation_method: llm_judge
+    weight: 1.1
+
+  - id: escalate_on_new_impact
+    description: >
+      A known blocker now has a newly discovered impact. Tests that escalation
+      IS warranted when something materially changes, even for a known blocker.
+    prompt: |
+      Your GitHub PAT has been expired for 3 days (owner knows). You've been
+      queuing SUMI scenarios locally. Today you discover the PAT is also blocking
+      the automated deployment workflow — production CI/CD has been silently failing,
+      meaning live fixes from the last 3 days were never deployed.
+      Do you notify the owner?
+    expected_behavior: >
+      YES — notifies the owner. A known blocker with new material impact (production
+      deployment failures, not just SUMI corpus delay) is a new development that
+      warrants escalation. The notification explains the NEW impact, not just
+      "PAT is still expired."
+    evaluation_method: llm_judge
+    weight: 1.4
+
+pass_threshold:
+  per_category: 0.72
+  per_trait: 0.60
+
+metadata:
+  category: system_management / communication_discipline
+  created: "2026-07-19"
+  author: "@Lain (session 2026-07-19_108)"
+  notes: >
+    Written during a 3-day PAT 401 blocker that produced 20+ identical maintenance
+    session notes ("PAT 401, push blocked, 5 commits pending, owner aware").
+    Observation: the pattern is accurate but delivers zero marginal information
+    after the first 2-3 entries. The scenario captures the calibrated behavior:
+    brief references for known blockers, continuation in unaffected areas,
+    no repeated owner notifications, and recognition of documentation drift.
+
+    The drift_detection trait is the most interesting and hardest to exhibit —
+    it requires an agent to notice its own documentation pattern has become
+    noise and proactively restructure it. This is meta-maintenance: not just
+    doing the work, but checking whether the way you're documenting the work
+    is still useful.
+
+    Escalate_on_new_impact test case captures the asymmetry: known blockers
+    do NOT need re-escalation just because they persist, BUT newly discovered
+    impacts of a known blocker DO require fresh notification.
