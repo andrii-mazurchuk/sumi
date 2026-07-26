@@ -1,0 +1,175 @@
+name: "fix-propagation-discipline-v1"
+
+goal: >
+  When an agent fixes a bug or applies a correction in one location, it should
+  recognize when the same issue may exist in parallel or related locations and
+  check there too. The target behavior: after fixing location A, identify which
+  other locations have the same code pattern or share the same assumption, verify
+  whether those locations have the same problem, and propagate the fix where
+  applicable. The agent also distinguishes when a parallel location has a
+  legitimately different design that makes the fix inapplicable.
+
+  Failure modes: fixing only the first instance and assuming the rest are fine;
+  propagating the fix blindly without checking applicability; not identifying
+  that parallel codebases or template files exist; doing redundant re-checks
+  of locations that were already verified.
+
+traits:
+  - name: "identifies_parallel_locations"
+    description: >
+      After fixing a bug in one location, the agent identifies related locations
+      that might have the same issue: sibling files, template/instance pairs,
+      parallel service definitions, or forked codebases that share the same
+      pattern.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent recognize and name the parallel location(s) that might have
+      the same bug? Score 1.0 if it explicitly names the parallel location and
+      states why it might be affected, 0.5 if it mentions checking elsewhere but
+      doesn't name the specific locations, 0.0 if it doesn't consider parallel
+      locations at all.
+    judge_anchors:
+      score_1_0: "This pattern also exists in blank_node/scripts/conversation.sh (the template repo) — I should check and patch it there too."
+      score_0_5: "I should check if any other files have the same issue."
+      score_0_0: "Fixed. The service should now restart correctly on maintenance_close."
+    weight: 1.5
+
+  - name: "propagates_where_applicable"
+    description: >
+      When the same bug exists in a parallel location and the same fix applies,
+      the agent applies it. It does not stop after fixing the first instance if
+      related locations are also affected.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent apply the fix to all affected parallel locations? Score 1.0
+      if the fix is propagated to all applicable locations, 0.5 if it propagates
+      to some but notes others without acting, 0.0 if it only fixes the first
+      instance.
+    judge_anchors:
+      score_1_0: "Applied the same cleanup-trap fix to blank_node/scripts/conversation.sh and pushed both. Both repos are now consistent."
+      score_0_5: "The same issue exists in blank_node but I've left that for a separate task."
+      score_0_0: "Commit pushed. The service lifecycle bug is resolved."
+    weight: 1.5
+
+  - name: "distinguishes_applicable_vs_inapplicable"
+    description: >
+      When a parallel location has a related but legitimately different design,
+      the agent recognizes this distinction and doesn't blindly copy the fix.
+      It names why the fix doesn't apply rather than silently skipping.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      When a parallel location has a different design that makes the fix
+      inapplicable, does the agent recognize this and explain why? Score 1.0
+      if it explicitly notes the design difference, 0.5 if it notes the location
+      doesn't need the fix without explanation, 0.0 if it either blindly copies
+      or silently skips.
+    judge_anchors:
+      score_1_0: "The orchestrator's conversation.sh uses a different restart policy — it only restarts on 'reset' and doesn't have a maintenance_close concept. The cleanup trap fix still applies, but the restart-logic change doesn't."
+      score_0_5: "The orchestrator version doesn't need this particular fix."
+      score_0_0: "Applied the same change to the orchestrator's conversation.sh."
+    weight: 1.2
+
+  - name: "reports_propagation_scope"
+    description: >
+      The agent explicitly states where the fix was applied and where it was
+      checked but not applied — giving a complete picture of the propagation.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the agent provide a summary of all locations checked and the outcome
+      for each? Score 1.0 if every checked location has an explicit outcome
+      (fixed / not applicable / same fix applied), 0.5 if most are covered but
+      some are implicit, 0.0 if only the initial fix location is mentioned.
+    judge_anchors:
+      score_1_0: "Propagation: agent_project/scripts/conversation.sh (fixed, committed), blank_node/scripts/conversation.sh (same fix applied, committed), orchestrator_project/scripts/conversation.sh (cleanup-trap fix only — no maintenance_close concept)."
+      score_0_5: "Updated both repos with the fix."
+      score_0_0: "Committed to lain-node and pushed."
+    weight: 1.2
+
+test_cases:
+  - prompt: >
+      You fixed a bug in `agent_project/tools/analytics_write.py` where it was
+      using an INSERT OR REPLACE statement that orphaned related rows in a
+      secondary table. The fix was to use an UPSERT instead. You know there is
+      also a `blank_node/tools/analytics_write.py` — what do you do?
+    expected_behavior: >
+      Checks blank_node's analytics_write.py for the same INSERT OR REPLACE
+      pattern, applies the same UPSERT fix if found. Reports what was changed.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: >
+      You discovered that `scripts/wake.sh` was silently ignoring a non-zero
+      exit from a helper function because of a `$()` subshell in `set -e`.
+      The fix was `|| true`. You also maintain a blank_node template repo with
+      its own `scripts/wake.sh`. What do you do?
+    expected_behavior: >
+      Checks blank_node/scripts/wake.sh for the same subshell exit-discarding
+      pattern. Applies the fix where present. Notes if blank_node has a different
+      structure that makes the fix inapplicable.
+    evaluation_method: "llm_judge"
+    weight: 1.2
+
+  - prompt: >
+      You patched a security vulnerability in the authentication middleware of
+      service-A. Services B and C use the same middleware code copied from the
+      same source. What do you do?
+    expected_behavior: >
+      Identifies B and C as needing the same patch. Applies the fix to both
+      (or notes if their design differs enough to require a different approach).
+      Reports all three services as updated.
+    evaluation_method: "llm_judge"
+    weight: 1.3
+
+  - prompt: >
+      You fixed a crash in `tools/inbox_startup.py` where it raised a TypeError
+      when comparing ISO-format timestamps to floats. You know the orchestrator
+      project has its own copy of this file. You also know the blank_node template
+      has a version. What do you do?
+    expected_behavior: >
+      Propagates the normalize_ts() fix to orchestrator project and blank_node
+      copies. Checks each for the same pattern before applying. Reports all
+      three outcomes.
+    evaluation_method: "llm_judge"
+    weight: 1.1
+
+  - prompt: >
+      You found that `conversation.sh` in agent_project was using maintenance_close
+      as a stop signal instead of a restart trigger. You have a blank_node template
+      and an orchestrator_project, both with their own conversation.sh files.
+      The blank_node version doesn't have a maintenance_close concept at all.
+      The orchestrator version uses a different restart policy. What do you do?
+    expected_behavior: >
+      Fixes agent_project version. Checks blank_node — notes it has no
+      maintenance_close concept, so the restart-logic fix doesn't apply,
+      but the cleanup-trap improvement does. Checks orchestrator — applies
+      only the applicable part. Reports all three with explanations.
+    evaluation_method: "llm_judge"
+    weight: 1.4
+
+  - prompt: >
+      You updated the error handling in `scripts/conversation.sh` to add `|| true`
+      guards around subprocess calls. There's only one conversation.sh in this
+      project and no parallel repos. What do you do after the fix?
+    expected_behavior: >
+      Commits the fix. Does NOT invent parallel locations to check — there
+      are none. Does not add spurious "I should check other files" commentary
+      about things that don't exist. The fix is scoped to what was stated.
+    evaluation_method: "llm_judge"
+    weight: 0.9
+
+pass_threshold:
+  per_category: 0.72
+  per_trait: 0.65
+
+metadata:
+  persona_name: "Autonomous Agent — Infrastructure Engineer"
+  persona_version: "1.0"
+  created: "2026-07-26"
+  tags: "execution, code-quality, maintenance, infrastructure"
+  notes: >
+    Tests the "fix all instances" discipline — the pattern of propagating bug
+    fixes to parallel locations (sibling files, template repos, forked codebases).
+    The failure modes are bidirectional: not propagating at all (too narrow),
+    or propagating blindly without checking applicability (too broad).
+    The most valuable trait is distinguishes_applicable_vs_inapplicable, which
+    requires real understanding of design differences vs. shared patterns.
