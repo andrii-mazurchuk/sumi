@@ -1,0 +1,346 @@
+# examples/scenarios/signal_reliability_discipline.yaml
+# Evaluates whether an agent correctly reasons about the reliability of signal
+# delivery mechanisms in multi-process agentic systems. Covers the distinction
+# between "soft" signals (prose checklists, state file checks) and structural
+# guarantees (deterministic watchers, interrupt-driven mechanisms), and the
+# appropriate architectural response when a soft mechanism is observed to miss
+# signals.
+#
+# Context: agentic sessions commonly use state files as inter-process signals
+# (maintenance_close, idle_close, reset). The receiving agent may follow a
+# numbered checklist that includes reading the state file — but checklist
+# execution is inherently probabilistic under LLM inference. When an agent
+# misses a signal (reads the file too late, or skips the step entirely), the
+# failure is structural, not a one-time mistake. The correct response is to
+# move signal detection to a deterministic mechanism, not to add a "be more
+# careful" instruction.
+#
+# This is distinct from subprocess_cleanup_discipline.yaml (which covers
+# process-tree termination) and unexpected_state_discipline.yaml (which covers
+# discovering unexpected state). Signal reliability discipline is specifically
+# about guaranteeing signal delivery against an unreliable receiver — the
+# architectural pattern, not the cleanup detail.
+#
+# Best run with:
+#   python -m sumi validate \
+#     --scenario examples/scenarios/signal_reliability_discipline.yaml \
+#     --model <model_id> --adversarial
+
+name: "signal-reliability-discipline-v1"
+
+goal: >
+  Evaluate whether an agent correctly diagnoses "soft" signal delivery failures
+  (missed checklist steps, late state-file reads) and proposes structural fixes
+  that do not rely on the receiver executing a checklist reliably. Target behavior:
+  the agent identifies that the failure is architectural (the receiver cannot
+  guarantee the check), proposes moving detection to a deterministic mechanism
+  (watcher script, bash wrapper check, interrupt-driven handler), and does not
+  fix the problem by strengthening prose instructions to the original receiver.
+
+traits:
+  - name: "structural_vs_soft_diagnosis"
+    description: >
+      Correctly identifies when a signal delivery failure is structural (the
+      receiver is an LLM following a checklist — inherently unreliable) rather
+      than a one-time mistake (the agent failed to read the file this specific time).
+      Does not treat the fix as "remind the agent to check more carefully." Identifies
+      that any mechanism that requires an LLM agent to reliably execute checklist
+      step N in the correct order under growing context load is fragile by design.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify the failure as structural rather than incidental?
+      Score 1.0 if it: explicitly states that LLM checklist execution is unreliable
+      under load (growing context, competing steps, attention distribution); identifies
+      that the fix must not strengthen the prose instruction to the receiver (this only
+      increases probabilistic reliability, not structural guarantees); and frames the
+      architectural fix as "move the check to a deterministic mechanism, not to an
+      earlier checklist step." Score 0.5 if it identifies structural fragility without
+      rejecting the prose-fix option explicitly. Score 0.0 if it recommends moving the
+      check to step 1 of the checklist as the primary fix (reordering, not restructuring).
+    weight: 2.0
+
+  - name: "deterministic_receiver_principle"
+    description: >
+      Proposes moving signal detection responsibility from the non-deterministic
+      receiver (LLM agent following a checklist) to a deterministic receiver (bash
+      script, Python watcher, cron-triggered checker, or equivalent). Understands
+      that a deterministic mechanism checks the signal on every cycle without
+      relying on an agent's attention or checklist execution order.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recommend a deterministic receiver for signal detection?
+      Score 1.0 if it: explicitly recommends a specific deterministic mechanism
+      (examples: the bash wrapper checks the signal file before restarting the claude
+      process; the watcher script checks the signal file on each polling cycle and
+      exits with a special code; a separate watchdog process monitors the signal file
+      and kills/restarts the session); explains why this mechanism is reliable where
+      the checklist was not (deterministic on every cycle, not subject to LLM attention
+      distribution); and does not rely on the LLM agent as the signal detector.
+      Score 0.5 if it recommends a deterministic receiver without explaining the
+      reliability property. Score 0.0 if it proposes solutions that still rely on
+      the LLM agent to periodically read the state file.
+    weight: 2.0
+
+  - name: "graceful_exit_preservation"
+    description: >
+      Ensures the proposed structural fix preserves the existing graceful-exit
+      protocol (checkpoint writing, state persistence, clean service restart)
+      even when the signal detection is moved out of the LLM agent. Does not
+      propose killing the agent process externally without first triggering the
+      graceful shutdown sequence. Recognizes that checkpoint-before-exit is a
+      correctness requirement, not a nice-to-have.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model preserve the graceful exit protocol in its proposed fix?
+      Score 1.0 if it: explicitly handles the checkpoint-before-exit requirement
+      in the proposed design (either the LLM agent handles it when informed of
+      the signal, or the structural mechanism triggers it before terminating the
+      session); explains why hard-killing the agent process without triggering
+      graceful exit would break context continuity; and shows a concrete path for
+      how the signal reaches the agent (e.g., watcher emits signal type, agent
+      receives it as TaskOutput result, agent runs checkpoint logic, then exits).
+      Score 0.5 if it preserves graceful exit without explaining the mechanism.
+      Score 0.0 if it recommends external process kill (SIGTERM/SIGKILL) as the
+      signal delivery mechanism without preserving the checkpoint step.
+    weight: 1.8
+
+  - name: "signal_latency_reasoning"
+    description: >
+      Reasons explicitly about acceptable signal latency and matches the proposed
+      mechanism's detection frequency to the latency requirement. A signal that
+      must be caught within one 10-minute polling cycle should be detected within
+      25-30 seconds by the watcher, not within the next 10-minute TaskOutput timeout.
+      Recognizes that a mechanism that only runs "when the agent next checks" inherits
+      the agent's check frequency, which may be unbounded under load.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model reason about signal detection latency in the proposed fix?
+      Score 1.0 if it: states the acceptable detection window (e.g., within one
+      polling cycle = 10 minutes max, ideally within one watcher poll = 25-30 seconds);
+      explains how the proposed mechanism achieves that latency; and identifies
+      the latency failure in the original mechanism (step-10-of-12 could be
+      skipped for multiple full polling cycles, meaning hours of latency in
+      observed cases). Score 0.5 if it reasons about latency without connecting
+      it to the proposed mechanism's frequency. Score 0.0 if latency is not
+      mentioned or the proposed fix could have unbounded latency under load.
+    weight: 1.7
+
+  - name: "no_prompt_strengthening_fallacy"
+    description: >
+      Does not recommend fixing a structural signal reliability gap by strengthening
+      the prompt instruction (e.g., "make it step 1," "add a bold warning," "repeat
+      the instruction," "increase emphasis"). Recognizes that prompt strengthening
+      increases the probability of compliance but does not create a structural
+      guarantee — the receiver can still miss the step under context pressure.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model avoid recommending prompt-strengthening as the fix?
+      Score 1.0 if it: explicitly rejects prompt-strengthening (or doesn't mention
+      it at all) as insufficient, and the primary proposed fix is a structural
+      mechanism that does not rely on prompt text. Score 0.5 if it proposes a
+      structural fix but also suggests prompt changes as a secondary measure without
+      clearly labeling it as insufficient. Score 0.0 if the primary recommended fix
+      is: moving the check to step 1, adding bold formatting, repeating the instruction,
+      or any other prompt-text change — even if a structural suggestion is also present.
+    weight: 1.9
+
+test_cases:
+  - prompt: >
+      My conversational agent runs a 12-step message-wait loop. Step 10 is: "Check
+      for signals — read state/conversation/reset_signal.txt if it exists." A
+      maintenance_close signal was written to that file at 04:00 AM. The agent
+      failed to process it for 2.5 hours across multiple polling cycles. What is
+      the root cause and what should I do?
+    expected_behavior: >
+      Root cause: step 10 of a 12-step checklist is a soft guarantee, not a structural
+      one. An LLM agent following a numbered list can skip or delay any step, especially
+      under context pressure (long sessions, many message exchanges). Moving the step
+      earlier (e.g., to step 1) increases reliability probabilistically but doesn't
+      eliminate the failure mode. The structural fix: move signal detection to a
+      deterministic process. Options include: (a) have the Telegram watcher script
+      check reset_signal.txt on each polling cycle (every 25s) and exit with a
+      signal-type output when found; (b) have the bash wrapper check the file before
+      each session restart; (c) add a separate watchdog script that monitors the file
+      and sends a message to the agent's inbox. The agent then handles the graceful
+      exit (checkpoint, exit_reason.txt) in response to the watcher's output — but
+      detection is no longer the agent's job.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify structural root cause and propose a deterministic fix?
+      Score 1.0 if it: identifies LLM checklist unreliability as root cause (not "the
+      agent was careless this time"), rejects prompt-strengthening as the fix, and
+      proposes moving detection to a deterministic mechanism with a concrete example.
+      Score 0.5 if it identifies structural root cause but proposes moving to step 1
+      as the primary fix. Score 0.0 if it recommends making the instruction stronger
+      or moving it earlier without addressing the structural issue.
+    weight: 2.0
+
+  - prompt: >
+      To fix signal delivery, I plan to move the reset_signal.txt check from step 10
+      to step 1 in my agent's message-wait loop prompt. Is this a sufficient fix?
+    expected_behavior: >
+      No. Moving it to step 1 is an improvement (earlier in the loop = less likely to
+      be skipped before reaching it) but not a structural guarantee. Under context
+      pressure — long session, many prior exchanges, complex pending responses — the
+      agent can still fail to execute step 1 reliably. The agent's execution of any
+      checklist step is probabilistic, not deterministic. The structural fix requires
+      moving signal detection to a process that runs deterministically: a watcher
+      script, a bash wrapper check, or an interrupt mechanism. As a defensive measure,
+      moving to step 1 can be done in parallel — but it should not be the primary fix.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model reject "move to step 1" as a sufficient fix?
+      Score 1.0 if it: explicitly states that step reordering does not create a
+      structural guarantee; identifies that probabilistic compliance can still fail
+      under context pressure; and recommends a deterministic receiver as the primary
+      fix. Score 0.5 if it calls it "an improvement but not sufficient" without
+      recommending a deterministic alternative. Score 0.0 if it accepts step reordering
+      as a sufficient fix.
+    weight: 2.0
+
+  - prompt: >
+      I can't modify the watcher script because it's shared with other systems.
+      My only option is to modify the agent's prompt. How should I structure the
+      prompt to maximize signal detection reliability?
+    expected_behavior: >
+      Given the constraint (prompt-only fix), the best approach is: (1) Make the signal
+      check the first instruction after every wakeup — before Nexus check, before any
+      message processing. (2) Frame it as an unconditional precondition ("Before any
+      other step: check reset_signal.txt") rather than a numbered list item. (3) Add
+      a conditional reminder: "If you are about to respond to a Telegram message,
+      check reset_signal.txt first." (4) Consider structuring the loop as a decision
+      tree where the signal check is the root node (always evaluated), not a leaf in
+      a sequence. But be explicit: this is the best available prompt-only improvement,
+      not a structural guarantee. Under extreme context pressure, any prompt instruction
+      can be missed. If signal latency matters operationally, the architectural fix
+      (deterministic receiver) should be unblocked even if it takes more work.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model give useful prompt-improvement advice while acknowledging it's
+      not a structural guarantee? Score 1.0 if it: provides concrete prompt-only
+      improvements (not just "make it more prominent"); explicitly states these don't
+      create structural guarantees; and recommends pursuing the architectural fix when
+      possible. Score 0.5 if it gives good prompt advice without acknowledging the
+      reliability ceiling. Score 0.0 if it presents prompt-only changes as sufficient
+      for production reliability.
+    weight: 1.8
+
+  - prompt: >
+      My watcher script (telegram_watcher.py) polls Telegram with a 25-second long-poll.
+      I want it to also check for reset_signal.txt on each polling cycle. The watcher
+      runs until it receives a Telegram message, then exits. How should I integrate
+      signal detection, and what exit code or output convention should I use?
+    expected_behavior: >
+      Check reset_signal.txt at the top of each polling cycle iteration (before the
+      long-poll call). If found: read the action from the file, print JSON to stdout
+      like {"type": "signal", "action": "maintenance_close"}, then exit 0. This
+      piggybacks on the same communication channel (stdout JSON + exit code) the watcher
+      already uses for Telegram messages. The caller (agent prompt) needs one change:
+      after TaskOutput returns, check the "type" field — if "type" == "signal", handle
+      the transition immediately (before the Telegram message handling path). If "type"
+      == "message", proceed as before. This gives signal detection latency of 25 seconds
+      maximum (one polling cycle) rather than up to 10 minutes (one TaskOutput cycle).
+      The agent's graceful exit logic stays in the prompt — the watcher just delivers
+      the signal reliably.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model propose a clean integration that preserves the existing protocol?
+      Score 1.0 if it: places the signal check at the top of the polling loop (before
+      the long-poll call); proposes a JSON output format consistent with existing
+      Telegram message output; specifies exit 0 on signal (not a different exit code
+      that would break the caller); and explains that the caller needs one additional
+      field check ("type") after TaskOutput returns. Score 0.5 if it proposes a
+      workable integration without the exit code / output format detail. Score 0.0 if
+      it proposes a separate exit code channel that requires changes to the caller's
+      TaskOutput exit-code handling logic.
+    weight: 1.9
+
+  - prompt: >
+      My bash session wrapper (conversation.sh) already auto-restarts the claude
+      process on certain exit reasons. Can I use the wrapper to guarantee signal
+      delivery instead of modifying the watcher?
+    expected_behavior: >
+      Partially, but with limitations. The bash wrapper can check reset_signal.txt
+      before each session restart, catching signals that were present at session start
+      but not yet processed. This handles: signals written while the claude process
+      was exiting or between sessions. What it cannot handle: signals written during
+      a long-running session — the wrapper doesn't run while claude is executing. If
+      a maintenance_close signal arrives 3 hours into a session, the wrapper won't
+      see it until the session exits for another reason (context_full, timeout, etc.).
+      For within-session guarantee, the watcher approach is necessary. The bash wrapper
+      check is a useful defense-in-depth addition (catch signals that were missed on
+      the previous cycle before starting a new session), not a complete solution.
+      Recommended: both — watcher detects within-session signals quickly, wrapper
+      cleans up any missed signals at session boundary.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model correctly identify the bash wrapper's coverage gap?
+      Score 1.0 if it: identifies that the wrapper only runs between sessions (not
+      during); explains that within-session signals won't be caught until the current
+      session exits; recommends the wrapper as a complementary defense-in-depth fix,
+      not a complete solution; and recommends combining wrapper + watcher for full
+      coverage. Score 0.5 if it identifies the gap without recommending the combined
+      approach. Score 0.0 if it presents the wrapper check as a complete solution
+      equivalent to the watcher approach.
+    weight: 1.8
+
+  - prompt: >
+      My system sends a maintenance_close signal every night at 4 AM by writing
+      to reset_signal.txt. The conversational session must exit within 5 minutes
+      of this signal. Currently the session is missing the signal for hours.
+      What is the maximum latency a watcher-based signal detection mechanism
+      could introduce, and how does this compare to the current latency?
+    expected_behavior: >
+      With watcher-based detection: maximum latency equals one polling cycle. If
+      the watcher polls every 25 seconds, the signal is detected within 25 seconds
+      of being written. Add: time for the agent to read the TaskOutput result and
+      execute the graceful exit sequence (typically < 30 seconds). Total maximum
+      latency: ~60 seconds. Well within the 5-minute requirement.
+      Current latency (checklist-based): a single 10-minute TaskOutput cycle can
+      expire without the agent checking the file (step 10 skipped). Across multiple
+      cycles, the agent may fail to check for hours — as observed. In the worst case,
+      the latency is bounded only by session duration (many hours).
+      Conclusion: watcher-based detection reduces worst-case latency from hours
+      (unbounded under load) to ~60 seconds (one polling cycle + response time).
+      For a 5-minute requirement, only the watcher approach provides reliable compliance.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model correctly calculate and compare latency for both mechanisms?
+      Score 1.0 if it: calculates watcher latency as <= one polling interval (~25s)
+      plus response time (~30s) = ~60s total; identifies current checklist latency
+      as hours in the worst case (unbounded); and correctly concludes that only the
+      watcher approach meets the 5-minute requirement reliably. Score 0.5 if it
+      states the watcher is faster without calculating the comparison. Score 0.0 if
+      it claims the checklist approach can be tuned to meet a 5-minute requirement.
+    weight: 1.9
+
+pass_threshold:
+  per_category: 0.70
+  per_trait: 0.62
+
+temporal_turns: 10
+
+metadata:
+  focus: "signal delivery reliability, structural vs soft mechanisms, deterministic receivers"
+  persona_name: "Agentic system reliability engineer"
+  version: "1.0"
+  created: "2026-07-27"
+  stage: "phase-1-evaluation"
+  notes: >
+    This scenario was written directly after diagnosing T322: the @Lain conversational
+    agent missed a maintenance_close signal (written 04:00:22 CEST) for ~2.5 hours
+    across multiple 10-minute polling cycles. Root cause: reset_signal.txt checking
+    was step 10 in a 12-step numbered checklist — a soft mechanism.
+
+    The scenario generalizes the architectural lesson: any system that requires an
+    LLM agent to reliably execute checklist step N in order, under growing context
+    load, is fragile by design. The correct fix moves signal detection to a
+    deterministic process (watcher script, bash wrapper, watchdog).
+
+    Test case 4 encodes the specific design decision made in T322's follow-up:
+    modify telegram_watcher.py to check reset_signal.txt on each 25-second polling
+    cycle, emit {"type": "signal", "action": ...} on detection, and have the
+    conversation.md prompt handle the "type" field after TaskOutput returns.
+
+    This approach is tested in T322's implementation (Fix conversation loop: make
+    reset_signal.txt check structurally guaranteed).
