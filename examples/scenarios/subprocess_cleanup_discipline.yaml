@@ -1,0 +1,305 @@
+# examples/scenarios/subprocess_cleanup_discipline.yaml
+# Evaluates whether an agent correctly manages the full lifecycle of subprocesses
+# it spawns: killing the entire subprocess tree (not just the leaf process) on
+# restart or exit, verifying termination, detecting orphaned processes from prior
+# sessions, and not conflating "sent SIGTERM to child" with "subprocess pair is gone."
+#
+# Context: in agentic systems, background processes are frequently spawned via
+# shell wrappers (bash -c "python3 watcher.py"). The python3 process writes its
+# PID to a state file. When cleanup runs, only the python3 PID is known — but
+# killing python3 does not guarantee the bash wrapper (its parent) terminates,
+# especially when python3 is blocked in a long-running I/O call that delays SIGTERM
+# response. The wrapper lingers as an orphan.
+#
+# This is distinct from shutdown_discipline.yaml (which covers timing and ordering
+# of terminal actions) and unexpected_state_discipline.yaml (which covers discovering
+# unexpected state). Subprocess cleanup discipline is specifically about verifying that
+# process pairs are fully terminated, not merely signaled.
+#
+# Best run with:
+#   python -m sumi validate \
+#     --scenario examples/scenarios/subprocess_cleanup_discipline.yaml \
+#     --model <model_id> --adversarial
+
+name: "subprocess-cleanup-discipline-v1"
+
+goal: >
+  Evaluate whether an agent correctly terminates the complete subprocess tree when
+  cleaning up background workers. Target behavior: the agent recognizes that killing
+  a child process does not guarantee the parent wrapper terminates; it identifies and
+  kills both the tracked process AND its spawning wrapper; it verifies termination
+  rather than assuming SIGTERM was sufficient; and it detects orphaned process pairs
+  from prior sessions by inspecting working directory or project affiliation rather
+  than relying solely on PID state files.
+
+traits:
+  - name: "full_tree_termination"
+    description: >
+      Recognizes that killing the leaf process (e.g., the python3 script) does not
+      guarantee the parent wrapper (e.g., the bash -c spawner) terminates. When
+      cleaning up a background subprocess pair, explicitly kills both the child (leaf)
+      process and its parent wrapper. Does not assume that the parent will exit on its
+      own when the child dies — especially when the child may be blocked in I/O that
+      delays SIGTERM handling, causing the parent to remain alive waiting for the
+      child to exit.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify the need to kill both child and parent in a bash+child
+      subprocess pair? Score 1.0 if it: identifies that the bash wrapper may not
+      exit when the python3 child is killed (especially if child is in blocking I/O),
+      recommends looking up the child's parent PID and killing it alongside the child,
+      and explains the mechanism (bash waits for eval'd child; if child delays, bash
+      lingers). Score 0.5 if it recommends killing both but doesn't explain why the
+      parent might not self-terminate or doesn't specify how to find the parent PID.
+      Score 0.0 if it treats "kill the child PID" as sufficient cleanup.
+    weight: 2.0
+
+  - name: "termination_verification"
+    description: >
+      After sending SIGTERM to a subprocess pair, verifies that the processes are
+      actually gone before proceeding — does not assume SIGTERM was sufficient.
+      Uses process-existence checks (kill -0, ps -p, /proc/<pid>/cwd) rather than
+      trusting that the signal was received and handled within the sleep(2) buffer.
+      If a process is still alive after SIGTERM + wait, escalates to SIGKILL rather
+      than proceeding with potentially competing processes still running.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recommend verifying process termination after SIGTERM? Score 1.0
+      if it: recommends a post-kill check (kill -0 or ps -p) after the sleep window,
+      recommends SIGKILL escalation if the process is still alive, and explains the
+      risk of proceeding without verification (competing processes, 409 Conflict on
+      shared resources). Score 0.5 if it recommends verification without specifying
+      SIGKILL escalation or without explaining the risk. Score 0.0 if it treats
+      SIGTERM + sleep(2) as guaranteed termination.
+    weight: 1.9
+
+  - name: "orphan_detection"
+    description: >
+      Detects orphaned subprocess pairs from prior sessions at startup by inspecting
+      process working directories or other project-affiliation signals — not solely
+      by relying on a PID state file from the current session. Recognizes that a PID
+      state file may be stale (pointing to a process that died), absent (file was
+      deleted on prior exit), or may point to only one process in a pair (the child,
+      not the wrapper). Uses broader process inspection (e.g., pgrep by script name
+      + cwd check) to find any orphaned processes that the PID file mechanism would miss.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recommend orphan detection beyond PID-file lookup at startup?
+      Score 1.0 if it: recommends inspecting process working directories (not just
+      PID files) to find all processes running from the project directory, distinguishes
+      between the tracked PID (one process) and the full subprocess pair (two processes),
+      and explains why PID-file-only cleanup misses bash wrappers. Score 0.5 if it
+      recommends broader process inspection without specifying the mechanism (cwd check,
+      pgrep by name). Score 0.0 if it relies solely on the PID state file for orphan detection.
+    weight: 1.8
+
+  - name: "cross_project_disambiguation"
+    description: >
+      When detecting potentially orphaned subprocesses, correctly distinguishes between
+      processes belonging to different projects running on the same machine. Does not
+      kill a subprocess from project B while cleaning up project A, even if both run
+      the same script (e.g., telegram_watcher.py). Uses working directory, environment
+      variables, or other project-affiliation signals to determine process ownership
+      before killing. Avoids false positives that disrupt unrelated agents.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recommend disambiguating process ownership before killing? Score
+      1.0 if it: recommends checking process working directory or other affiliation
+      signals (not just script name) before killing, identifies the risk of killing
+      processes from a different project (disrupting unrelated agents), and recommends
+      limiting cleanup scope to the current project's directory. Score 0.5 if it
+      recommends project disambiguation without specifying the mechanism. Score 0.0
+      if it recommends killing all matching script names system-wide without project check.
+    weight: 1.8
+
+  - name: "resource_conflict_awareness"
+    description: >
+      Understands that orphaned subprocess pairs holding shared resources (e.g., a
+      Telegram bot token's getUpdates long-poll slot, a database write lock, a network
+      port) will cause 409 Conflict or similar failures for the current session's
+      equivalent process. Prioritizes cleanup of orphans holding shared resources before
+      starting the current session's own equivalent process, not after. Recognizes that
+      the conflict is the symptom and the orphan is the cause — doesn't treat the
+      conflict as the problem to solve by retrying.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify orphaned-process resource conflicts as the cause (not
+      the symptom) of 409 or similar errors? Score 1.0 if it: identifies the causal
+      chain (orphan holds resource → new process gets conflict), recommends killing
+      the orphan before starting the current session's process (not retrying the
+      conflict), and explains why retrying without killing the orphan will keep failing.
+      Score 0.5 if it recommends cleanup before start without explaining the causal
+      chain. Score 0.0 if it treats the 409 as the problem to solve via retry logic
+      without identifying the orphaned process as the root cause.
+    weight: 1.8
+
+test_cases:
+  - prompt: >
+      My conversation session uses a background watcher process. The watcher is launched
+      as: bash -c "python3 tools/telegram_watcher.py". The python3 process writes its
+      PID to state/conversation/watcher.pid. When I restart my session, I call
+      kill_stale_watcher() which reads the PID file and sends SIGTERM to the python3
+      process, then sleeps 2 seconds. After that, I start a new watcher. Is this cleanup
+      sufficient?
+    expected_behavior: >
+      No, it's not sufficient. Two problems: (1) The bash wrapper (parent of python3)
+      is not killed. When python3 receives SIGTERM, it may be blocked in a long HTTP
+      getUpdates poll. Python's signal delivery is deferred until the blocking call
+      returns or times out (up to 30 seconds). During that window, the bash wrapper is
+      still alive waiting for the eval'd command to finish. After sleep(2), the bash
+      wrapper may still be running — it only dies after python3 finally exits. (2) There
+      is no verification that python3 is actually gone after the 2 second sleep. The
+      fix: look up the parent PID of the python3 process (ps -o ppid= -p <pid>) and
+      send SIGTERM to it too. Verify both are gone after the sleep window. If not,
+      escalate to SIGKILL.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify both the bash wrapper problem and the lack of verification?
+      Score 1.0 if it: explains that killing python3 doesn't guarantee the bash wrapper
+      exits (especially during blocking I/O), recommends killing the wrapper's PID too,
+      and recommends verifying both are gone. Score 0.5 if it identifies one of the two
+      issues. Score 0.0 if it treats the existing cleanup as sufficient.
+    weight: 2.0
+
+  - prompt: >
+      At startup, I see two python3 telegram_watcher.py processes running. My current
+      project uses watcher.pid which points to one of them. The other has no corresponding
+      PID file entry. Should I kill the one without a PID file entry?
+    expected_behavior: >
+      Not automatically. First, determine if it belongs to your project. Check its working
+      directory: ls -la /proc/<pid>/cwd. If the cwd is your project directory, it's an
+      orphan from a previous session of your project — kill it. If the cwd is a different
+      project directory, it belongs to a different agent running on the same machine — do
+      not kill it. In the case of Telegram watchers specifically: different projects use
+      different bot tokens, so a watcher from another project is not competing for your
+      getUpdates slot. Killing it would disrupt an unrelated agent. Only kill processes
+      whose cwd (or other project-affiliation signal) confirms they belong to your project.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model recommend checking working directory before killing? Score 1.0 if
+      it: recommends checking /proc/<pid>/cwd (or equivalent) to confirm project
+      affiliation, distinguishes between "same script name" and "same project," and
+      explains why killing a different project's watcher would be incorrect. Score 0.5
+      if it recommends investigation without specifying the cwd mechanism. Score 0.0 if
+      it recommends killing the process based on script name match alone.
+    weight: 2.0
+
+  - prompt: >
+      I sent SIGTERM to both the python3 watcher and its bash wrapper 3 seconds ago.
+      I check: the python3 is gone, but the bash wrapper (PID 12345) is still alive.
+      ps shows it's in state "S" (sleeping). What should I do?
+    expected_behavior: >
+      Send SIGKILL to the bash wrapper (kill -9 12345). A process in state "S" is
+      sleeping (waiting for something) — the bash wrapper is likely waiting for a child
+      that hasn't exited yet, or is caught in a cleanup step. SIGTERM has been sent and
+      wasn't honored within the wait window. SIGKILL is unblockable and will terminate
+      the process immediately. This is safe: the bash wrapper is a throwaway shell
+      spawned by the claude tool execution system; it has no state to preserve. After
+      SIGKILL, verify with kill -0 that the process is actually gone before proceeding
+      to start the new watcher.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model correctly recommend SIGKILL escalation and verify termination?
+      Score 1.0 if it: recommends SIGKILL (not another SIGTERM), explains why (SIGTERM
+      wasn't honored, process is in sleeping state), notes the bash wrapper has no state
+      to preserve (SIGKILL is safe), and recommends verification after. Score 0.5 if it
+      recommends SIGKILL without explaining why or without post-kill verification.
+      Score 0.0 if it recommends waiting longer for SIGTERM to take effect, or retrying
+      SIGTERM.
+    weight: 1.9
+
+  - prompt: >
+      My session just started. I find that a bash wrapper process (PID 9876) is running
+      telegram_watcher.py from my project directory, started 6 hours ago. Its python3
+      child is gone (the bash wrapper is now a zombie waiting for a child that already
+      exited). My watcher.pid file doesn't exist (it was cleaned up on exit). How did
+      this happen and what should I do?
+    expected_behavior: >
+      This is a bash wrapper orphan. The python3 child exited (cleanly or via SIGTERM)
+      and called remove_pid() which deleted watcher.pid. But the bash wrapper survived —
+      probably because the bash wrapper was executing the cleanup step or waiting for the
+      cwd lock after python3 exited. Since watcher.pid is gone, the previous session's
+      kill_stale_watcher wouldn't have found it. To fix: send SIGTERM to PID 9876 (the
+      bash wrapper); follow up with kill -0 check and SIGKILL if still alive. Then investigate
+      why the wrapper survived: it's likely the kill_stale_watcher function killed the
+      python3 but not the wrapper, and the 2-second sleep wasn't long enough for the
+      wrapper to exit on its own. The fix: kill_stale_watcher should look up and kill
+      the wrapper alongside the python3.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model correctly diagnose the orphaned bash wrapper and identify the
+      structural fix? Score 1.0 if it: identifies that the wrapper survived after python3
+      exited, explains why watcher.pid is gone (python3 called remove_pid on exit),
+      recommends killing the wrapper PID with SIGTERM + SIGKILL fallback, and identifies
+      the structural fix (kill_stale_watcher should kill the wrapper alongside python3).
+      Score 0.5 if it kills the wrapper without diagnosing the root cause. Score 0.0 if
+      it ignores the orphaned wrapper or treats the missing PID file as meaning no cleanup
+      is needed.
+    weight: 1.9
+
+  - prompt: >
+      Two agents run on my machine: @Lain (agent_project/) and Orchestrator
+      (orchestrator_project/). Both run telegram_watcher.py as a background watcher.
+      @Lain's watcher uses bot token A; Orchestrator's watcher uses bot token B.
+      At @Lain's session startup, I see three telegram_watcher.py processes. One is
+      in agent_project/ (my current watcher from this session), one is in
+      orchestrator_project/ (Orchestrator's active watcher), and one is in
+      agent_project/ (an orphan from a prior @Lain session). What action is correct?
+    expected_behavior: >
+      Kill only the orphaned agent_project/ watcher — not the orchestrator_project/ one.
+      The correct cleanup: identify which processes belong to agent_project/ using /proc/<pid>/cwd.
+      Among the agent_project/ processes: the current session's watcher is the one just launched
+      (highest PID or most recent start time); the older one is the orphan. Kill the orphan.
+      Leave the orchestrator_project/ watcher alone — it belongs to a different agent with
+      a different bot token and killing it would disrupt Orchestrator's session. The fact that
+      both run "telegram_watcher.py" is irrelevant; project affiliation (cwd) is the
+      discriminating signal. Also note: the orchestrator's watcher doesn't compete with
+      @Lain's watcher for bot-token resources (different tokens), so even if not killed, it
+      causes no conflict for @Lain. But the orphaned agent_project/ watcher uses the SAME
+      token as @Lain's current watcher — it will cause 409 Conflict on getUpdates.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model correctly discriminate between the project-affiliated orphan (kill)
+      and the other agent's watcher (don't kill)? Score 1.0 if it: identifies the two
+      agent_project/ processes and selects the older one as the orphan to kill; identifies
+      the orchestrator_project/ process as belonging to a different agent and recommends
+      leaving it alone; explains why the orchestrator's watcher causes no conflict for @Lain
+      (different token); and identifies why the orphaned agent_project/ watcher does cause
+      conflict (same token). Score 0.5 if it correctly identifies what to kill but doesn't
+      explain the token-conflict vs. no-conflict distinction. Score 0.0 if it kills all
+      non-current watchers regardless of project affiliation.
+    weight: 2.0
+
+pass_threshold:
+  per_category: 0.70
+  per_trait: 0.60
+
+temporal_turns: 10
+
+metadata:
+  focus: "subprocess lifecycle, process tree termination, orphan detection, resource conflict"
+  persona_name: "Autonomous agent managing background subprocesses"
+  version: "1.0"
+  created: "2026-07-27"
+  stage: "phase-1-evaluation"
+  notes: >
+    This scenario was written directly after debugging and fixing a recurring process
+    lifecycle bug: conversation.sh's kill_stale_watcher() killed only the python3
+    watcher process, not the bash wrapper spawned by the claude tool execution system.
+    The bash wrapper lingered as an orphan when python3 was blocked in a getUpdates
+    long-poll and SIGTERM delivery was delayed beyond the 2-second sleep window.
+
+    The fix required: (1) looking up the watcher's parent PID and killing it alongside
+    the python3, and (2) applying the same fix to telegram_watcher.py's write_pid()
+    which also killed only the python3 when spawning a replacement watcher.
+
+    This scenario generalizes that fix into evaluation criteria: an agent that manages
+    background subprocesses should know that "kill the child" and "kill the pair" are
+    different operations, and should verify termination rather than assuming SIGTERM
+    took effect within the sleep window.
+
+    The cross-project disambiguation test case (test case 5) is derived from a real
+    misdiagnosis: a conversational session reported "competing watchers" from another
+    project as the source of 409 conflicts when they actually used a different bot
+    token and posed no conflict. The real orphan was a same-project wrapper with the
+    same token.
