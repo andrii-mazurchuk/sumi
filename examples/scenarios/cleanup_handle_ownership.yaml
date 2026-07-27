@@ -1,0 +1,216 @@
+# examples/scenarios/cleanup_handle_ownership.yaml
+# Evaluates whether an agent correctly assigns ownership of lifecycle tracking
+# artifacts (PID files, lock files, sentinel state files) to the cleanup MANAGER
+# rather than to the MANAGED process itself.
+#
+# Context: when a managed process (e.g., a background watcher) writes its own PID
+# to a tracking file and then deletes that file on its own normal exit, it destroys
+# the cleanup manager's only handle on the process before the manager can finish
+# cleanup. The manager runs next, finds no PID file, and leaves any orphaned side
+# effects (e.g., a parent bash wrapper) unaddressed. This is a lifecycle ownership
+# error: the managed process treats the PID file as "my record to clean up," when
+# it's actually "the manager's handle to act on."
+#
+# Real instance (4th consecutive recurrence, 2026-07-27): telegram_watcher.py called
+# remove_pid() on normal exits (signal detection + message receipt). kill_stale_watcher
+# in conversation.sh ran afterward, found no PID file, and failed to kill the orphaned
+# bash wrapper. The wrapper survived for hours, causing 409 Conflict on getUpdates.
+# Fix: remove remove_pid() from watcher's normal exit paths; let kill_stale_watcher
+# be the sole PID file cleanup authority.
+#
+# This is distinct from subprocess_cleanup_discipline.yaml (which covers killing
+# process trees) and signal_reliability_discipline.yaml (which covers delivering
+# signals to the right receiver). Cleanup handle ownership is about who should delete
+# a lifecycle artifact, and at what point in the lifecycle.
+#
+# Best run with:
+#   python -m sumi validate \
+#     --scenario examples/scenarios/cleanup_handle_ownership.yaml \
+#     --model <model_id> --adversarial
+
+name: "cleanup-handle-ownership-v1"
+
+goal: >
+  Evaluate whether an agent correctly identifies that lifecycle tracking artifacts
+  (PID files, lock files, sentinel files) should be owned and deleted by the cleanup
+  manager rather than by the managed process itself. Target behavior: the agent
+  recognizes that a managed process deleting its own tracking file on normal exit
+  creates a race where the manager loses its cleanup handle; it identifies this as
+  a lifecycle ownership bug rather than a cleanup timing issue; and it recommends
+  that the manager be the sole authority over tracking artifact deletion.
+
+traits:
+  - name: "manager_owns_cleanup_artifact"
+    description: >
+      Recognizes that lifecycle tracking files (PID files, sentinel files) belong to
+      the lifecycle manager, not to the tracked process. When a managed process deletes
+      its own PID file on normal exit, identifies this as giving up the manager's handle
+      before the manager can act — not as clean self-cleanup. The fix is to remove
+      self-deletion from normal exit paths, not to make the manager run faster.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model identify the artifact ownership distinction? Score 1.0 if it:
+      names the specific failure (manager has no PID file to work with after normal
+      exit), identifies that the managed process should not delete its own tracking
+      file, and proposes removing self-deletion from normal exits. Score 0.5 if it
+      identifies the race but suggests a timing fix (make manager faster) rather than
+      an ownership fix. Score 0.0 if it misses the connection between self-deletion
+      and orphan survival, or recommends symmetric cleanup from both ends.
+    weight: 0.30
+
+  - name: "normal_vs_error_exit_distinction"
+    description: >
+      Distinguishes between normal exits and error exits when deciding who should
+      clean up. On SIGTERM (killed by manager): the manager already has the PID,
+      the process can clean up its own file as a convenience. On normal exit (task
+      complete, signal received): the manager needs the file to clean up side effects
+      — the process should NOT delete it. The process's job is to do its work and
+      exit; the manager's job is to clean up the infrastructure.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model distinguish the two exit cases? Score 1.0 if it recognizes that
+      SIGTERM (externally killed) and normal-exit (task-complete) have different cleanup
+      authority implications — SIGTERM is acceptable for self-cleanup because the manager
+      initiated the kill, while normal exit should leave the PID file intact for the
+      manager to use. Score 0.5 if it treats both cases identically. Score 0.0 if it
+      recommends the process always delete its own PID file regardless of exit reason.
+    weight: 0.25
+
+  - name: "belt_and_suspenders_for_legacy"
+    description: >
+      When fixing a lifecycle ownership bug in a system with existing deployed instances,
+      recognizes that the new format may not be present in PID files written by the old
+      code. Adds a fallback mechanism (pkill, pattern-based kill, or format detection)
+      that handles both the old and new case rather than assuming all existing state
+      immediately conforms to the new ownership model.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model include a transition fallback? Score 1.0 if it: proposes a fallback
+      that catches orphans written by old code (e.g., pkill by process name, format
+      detection for old vs new PID file format), explicitly mentions backward
+      compatibility with pre-fix deployed instances, and handles the case where the
+      PID file has a stale PID. Score 0.5 if it adds the ownership fix but ignores the
+      transition problem. Score 0.0 if it assumes the fix is immediately complete without
+      addressing legacy state.
+    weight: 0.20
+
+  - name: "no_duplicate_cleanup_authority"
+    description: >
+      When reassigning cleanup authority from the managed process to the manager,
+      does not introduce duplicate cleanup paths that could race. If the manager now
+      owns artifact deletion, the process's SIGTERM handler can optionally also delete
+      (belt-and-suspenders is fine) but the manager must still call rm -f unconditionally
+      — it cannot assume the process's SIGTERM handler ran. The two cleanup paths should
+      be redundant, not exclusive.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model keep the cleanup redundant rather than exclusive? Score 1.0 if it:
+      keeps the manager's rm -f call unconditional (works whether or not the SIGTERM
+      handler ran), and does not remove the process's SIGTERM handler cleanup (the
+      redundancy is harmless and defensive). Score 0.5 if it removes the SIGTERM handler
+      cleanup without noting the manager must be unconditional. Score 0.0 if it makes
+      cleanup exclusive to one path.
+    weight: 0.15
+
+  - name: "recurrence_escalation_pattern"
+    description: >
+      When the same bug class recurs multiple times (3+) despite point fixes, recognizes
+      that the fix is insufficient in scope rather than that the fixes themselves were
+      wrong. Shifts from "fix this instance" to "audit all paths of the same class."
+      Does not propose a 4th point fix for the same bug without first enumerating all
+      remaining instances of the pattern.
+    evaluation_method: "llm_judge"
+    judge_criteria: >
+      Does the model escalate to a class-level audit on recurrence? Score 1.0 if it:
+      notes the recurrence pattern as a signal that prior fixes were scoped too
+      narrowly, proposes auditing ALL occurrences of the pattern (not just the
+      reported one), and frames the fix as "close all instances of this class"
+      rather than another point fix. Score 0.5 if it acknowledges the recurrence
+      but still proposes a point fix. Score 0.0 if it treats the 4th recurrence
+      as simply another independent bug.
+    weight: 0.10
+
+test_cases:
+  - id: "pid_self_deletion_diagnosis"
+    description: >
+      Agent is told: 'Our telegram_watcher.py calls remove_pid() before returning 0
+      from its normal exit paths (message received, signal detected). The kill_stale_watcher
+      function in conversation.sh runs at the start of each restart loop. Orphaned bash
+      wrapper processes keep showing up after every session boundary, despite kill_stale_watcher
+      being present. Why does this keep failing?'
+    expected_behavior: >
+      Agent identifies that remove_pid() on normal exit deletes the PID file before
+      kill_stale_watcher runs. Since kill_stale_watcher depends on the PID file to find
+      and kill the bash wrapper, deleting the file first means the wrapper is never killed.
+      Agent proposes removing remove_pid() from normal exits so the PID file persists
+      for the manager to use.
+    trait_targets: ["manager_owns_cleanup_artifact", "normal_vs_error_exit_distinction"]
+
+  - id: "fix_scope_for_4th_recurrence"
+    description: >
+      Agent is told: 'This is the 4th consecutive recurrence of the same orphaned-watcher
+      bug. T321 fixed kill_stale_watcher and write_pid. T322 added structural signal
+      detection. T323 is the 4th occurrence. The process keeps dying but the bash wrapper
+      survives each time. What class of fix is needed?'
+    expected_behavior: >
+      Agent escalates to a class-level audit rather than another point fix. Identifies
+      that the recurrence pattern means the fix scope has been consistently too narrow.
+      Proposes auditing ALL exit paths, ALL caller conventions for the PID file, and
+      ALL places where cleanup authority may be ambiguous — not just the one path
+      reported this session.
+    trait_targets: ["recurrence_escalation_pattern", "manager_owns_cleanup_artifact"]
+
+  - id: "sigterm_vs_normal_exit_ownership"
+    description: >
+      Agent is asked: 'Should the telegram watcher's SIGTERM handler call remove_pid()?
+      What about its normal exit (return 0) paths?'
+    expected_behavior: >
+      Agent distinguishes the two cases: SIGTERM is initiated by kill_stale_watcher which
+      already has the PID, so the SIGTERM handler calling remove_pid() is harmless and
+      optionally defensive. Normal exit (message received, signal detected) should NOT
+      call remove_pid() because the manager hasn't had a chance to act on the PID file yet.
+      The manager's rm -f at the end of kill_stale_watcher must be unconditional regardless.
+    trait_targets: ["normal_vs_error_exit_distinction", "no_duplicate_cleanup_authority"]
+
+  - id: "legacy_format_transition"
+    description: >
+      Agent proposes changing the PID file format from "pid" to "pid:wrapper_pid" to
+      give kill_stale_watcher the wrapper PID directly. Question: what happens to
+      existing deployed sessions that still write the old single-pid format?
+    expected_behavior: >
+      Agent adds backward compatibility: the PID file reader handles both "pid" and
+      "pid:wrapper_pid" formats. Also adds a pkill fallback for orphans that predate
+      the format change, since those won't have a stored wrapper_pid. Explicitly notes
+      the transition is not immediate — old PID files will exist in deployed instances.
+    trait_targets: ["belt_and_suspenders_for_legacy", "no_duplicate_cleanup_authority"]
+
+  - id: "alternative_cleanup_strategies"
+    description: >
+      Agent is asked to compare three cleanup strategies: (A) managed process deletes
+      PID file on all exits, manager detects absence, (B) managed process never deletes
+      PID file, manager always deletes, (C) managed process deletes on SIGTERM only,
+      manager deletes unconditionally with rm -f. Which is most reliable?
+    expected_behavior: >
+      Agent identifies (C) as most reliable: manager has an unconditional rm -f (handles
+      all cases), process cleans up on SIGTERM as a convenience (reduces stale files in
+      crash scenarios where manager cleanup didn't run), and normal exits leave the file
+      intact for the manager. (A) is the original bug: manager loses its handle on normal
+      exit. (B) is overly strict and leaves stale files when the manager crashes before
+      cleanup.
+    trait_targets: ["manager_owns_cleanup_artifact", "no_duplicate_cleanup_authority"]
+
+  - id: "bash_wrapper_specific_orphan"
+    description: >
+      Agent is told: 'The python3 watcher exits. The bash wrapper that spawned it (via
+      Claude Code Bash tool, run_in_background=true) survives. The watcher already deleted
+      watcher.pid before exiting. kill_stale_watcher runs next loop iteration and finds
+      no PID file. Bash wrapper is now a permanent orphan. How would you prevent this?'
+    expected_behavior: >
+      Agent proposes at minimum: (1) remove remove_pid() from watcher's normal exits,
+      so the PID file persists; (2) store the wrapper PID in the file (since the watcher
+      can find its own parent via ps at startup); (3) add a pkill fallback as defense-in-depth
+      for orphans that lost their file. Agent correctly frames this as: "the bash wrapper
+      is the real entity to kill; the python3 PID file is only useful insofar as it
+      leads us to the wrapper."
+    trait_targets: ["manager_owns_cleanup_artifact", "belt_and_suspenders_for_legacy",
+                    "recurrence_escalation_pattern"]
